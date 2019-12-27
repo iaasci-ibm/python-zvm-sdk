@@ -244,6 +244,10 @@ def req_guest_pre_migrate(start_index, *args, **kwargs):
             'net_set': args[start_index + 1]}
     return url, body
 
+def req_guest_deregister(start_index, *args, **kwargs):
+    url = '/guests/%s/action'
+    body = {'action': 'deregister_vm'}
+    return url, body
 
 def req_guest_live_resize_cpus(start_index, *args, **kwargs):
     url = '/guests/%s/action'
@@ -600,6 +604,11 @@ DATABASE = {
         'args_required': 3,
         'params_path': 1,
         'request': req_guest_pre_migrate},
+    'guest_deregister': {
+        'method': 'POST',
+        'args_required': 1,
+        'params_path': 1,
+        'request': req_guest_deregister},
     'guest_live_migrate': {
         'method': 'POST',
         'args_required': 5,
