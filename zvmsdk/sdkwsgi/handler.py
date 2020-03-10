@@ -67,8 +67,14 @@ ROUTE_LIST = (
     ('/guests/{userid}/action', {
         'POST': guest.guest_action,
     }),
+    ('/guests/{userid}/power_state_real', {
+        'GET': guest.guest_get_power_state_real,
+    }),
     ('/guests/{userid}/info', {
         'GET': guest.guest_get_info,
+    }),
+    ('/guests/{userid}/adapters', {
+        'GET': guest.guest_get_adapters_info,
     }),
     ('/guests/{userid}/nic', {
         'POST': guest.guest_create_nic,
@@ -91,6 +97,9 @@ ROUTE_LIST = (
     }),
     ('/host', {
         'GET': host.host_get_info,
+    }),
+    ('/host/guests', {
+        'GET': host.host_get_guest_list,
     }),
     ('/host/diskpool', {
         'GET': host.host_get_disk_info,
