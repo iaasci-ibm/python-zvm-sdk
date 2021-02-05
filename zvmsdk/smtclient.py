@@ -33,6 +33,7 @@ import six
 import string
 import subprocess
 import tempfile
+import time
 
 from smtLayer import smt
 
@@ -166,9 +167,22 @@ class SMTClient(object):
         :disks: A list dictionary to describe disk info, for example:
                 disk: [{'size': '1g',
                        'format': 'ext3',
-                       'disk_pool': 'ECKD:eckdpool1'}]
+                       'disk_pool': 'ECKD:eckdpool1'},
+                       {'size': '1g',
+                       'format': 'ext3'}]
 
         """
+
+        # Firstly, check disk_pool in disk_list, if disk_pool not specified
+        # and not configured(the default vaule is None), report error
+        # report error
+        for idx, disk in enumerate(disk_list):
+            disk_pool = disk.get('disk_pool') or CONF.zvm.disk_pool
+            disk['disk_pool'] = disk_pool
+            if disk_pool is None:
+                msg = ('disk_pool not configured for sdkserver.')
+                LOG.error(msg)
+                raise exception.SDKGuestOperationError(rs=2, msg=msg)
 
         for idx, disk in enumerate(disk_list):
             if 'vdev' in disk:
@@ -177,12 +191,8 @@ class SMTClient(object):
             else:
                 vdev = self.generate_disk_vdev(start_vdev=start_vdev,
                                                offset=idx)
-
             self._add_mdisk(userid, disk, vdev)
             disk['vdev'] = vdev
-
-            if disk.get('disk_pool') is None:
-                disk['disk_pool'] = CONF.zvm.disk_pool
 
             sizeUpper = disk.get('size').strip().upper()
             sizeUnit = sizeUpper[-1]
@@ -604,6 +614,44 @@ class SMTClient(object):
             if 'lun' in loaddev:
                 rd += ' --loadlun %s' % loaddev['lun']
 
+        # now, we need consider swap only case, customer using boot
+        # from volume but no disk pool provided, we allow to create
+        # swap disk from vdisk by default, when we come to this logic
+        # we are very sure that if no disk pool, there is only one
+        # disk in disk_list and that's swap
+        vdisk = None
+
+        # this is swap only case, which means, you only create a swap
+        # disk (len disk_list is 1) and no other disks
+        if len(disk_list) == 1:
+            disk = disk_list[0]
+            if 'format' in disk and disk['format'].lower() == 'swap':
+                disk_pool = disk.get('disk_pool') or CONF.zvm.disk_pool
+                if disk_pool is None:
+                    # if it's vdisk, then create user direct directly
+                    vd = disk.get('vdev') or self.generate_disk_vdev(offset=0)
+                    disk['vdev'] = vd
+                    sizeUpper = disk['size'].strip().upper()
+                    sizeUnit = sizeUpper[-1]
+                    if sizeUnit != 'M' and sizeUnit != 'G':
+                        errmsg = ("%s must has 'M' or 'G' suffix" % sizeUpper)
+                        raise exception.SDKInvalidInputFormat(msg=errmsg)
+
+                    if sizeUnit == 'M':
+                        size = int(sizeUpper[:-1])
+                        if size > 2048:
+                            errmsg = ("%s is great than 2048M" % sizeUpper)
+                            raise exception.SDKInvalidInputFormat(msg=errmsg)
+
+                    if sizeUnit == 'G':
+                        size = int(sizeUpper[:-1])
+                        if size > 2:
+                            errmsg = ("%s is great than 2G" % sizeUpper)
+                            raise exception.SDKInvalidInputFormat(msg=errmsg)
+
+                    rd += ' --vdisk %s:%s' % (vd, sizeUpper)
+                    vdisk = disk
+
         action = "create userid '%s'" % userid
 
         try:
@@ -626,12 +674,17 @@ class SMTClient(object):
         with zvmutils.log_and_reraise_sdkbase_error(action):
             self._GuestDbOperator.add_guest(userid)
 
-        # Continue to add disk
-        if disk_list:
+        # Continue to add disk, if vdisk is None, it means
+        # it's not vdisk routine and we need add disks
+        if vdisk is None and disk_list:
             # not perform mkfs against root disk
             if disk_list[0].get('is_boot_disk'):
                 disk_list[0].update({'format': 'none'})
             return self.add_mdisks(userid, disk_list)
+
+        # we must return swap disk in order to make guest config
+        # handle other remaining jobs
+        return disk_list
 
     def _add_mdisk(self, userid, disk, vdev):
         """Create one disk for userid
@@ -643,6 +696,11 @@ class SMTClient(object):
         size = disk['size']
         fmt = disk.get('format', 'ext4')
         disk_pool = disk.get('disk_pool') or CONF.zvm.disk_pool
+        # Check disk_pool, if it's None, report error
+        if disk_pool is None:
+            msg = ('disk_pool not configured for sdkserver.')
+            LOG.error(msg)
+            raise exception.SDKGuestOperationError(rs=2, msg=msg)
         [diskpool_type, diskpool_name] = disk_pool.split(':')
 
         if (diskpool_type.upper() == 'ECKD'):
@@ -716,7 +774,8 @@ class SMTClient(object):
         : param fcpchannels: list of fcpchannels.
         : param wwpns: list of wwpns.
         : param lun: string of lun.
-        : return value: list of FCP devices and physical wwpns.
+        : return value: dict with FCP as key and list of wwpns this FCP can
+                        access as value.
         """
         fcps = ','.join(fcpchannels)
         ws = ','.join(wwpns)
@@ -733,7 +792,7 @@ class SMTClient(object):
 
         with zvmutils.expect_and_reraise_internal_error(
              modID='refresh_bootmap'):
-            (rc, output) = zvmutils.execute(cmd)
+            (rc, output) = zvmutils.execute(cmd, timeout=600)
         if rc != 0:
             err_msg = ("refresh_bootmap failed with return code: %d." % rc)
             err_output = ""
@@ -746,18 +805,18 @@ class SMTClient(object):
                                                     errcode=rc,
                                                     errmsg=err_output)
         output_lines = output.split('\n')
-        res_wwpns = []
-        res_fcps = []
+        paths_dict = {}
         for line in output_lines:
-            if line.__contains__("WWPNs: "):
-                wwpns = line[7:]
-                # Convert string to list by space
-                res_wwpns = wwpns.split()
-            if line.__contains__("FCPs: "):
-                fcps = line[6:]
-                # Convert string to list by space
-                res_fcps = fcps.split()
-        return res_wwpns, res_fcps
+            if line.__contains__("RESULT PATHS: "):
+                paths_str = line[14:]
+                # paths_str format: "FCP1:W1 W2,FCP2:W3 W4"
+                # convert paths string into a dict
+                paths_list = paths_str.split(',')
+                for path in paths_list:
+                    fcp, wwpn = path.split(':')
+                    wwpn_list = wwpn.split(' ')
+                    paths_dict[fcp] = wwpn_list
+        return paths_dict
 
     def guest_deploy(self, userid, image_name, transportfiles=None,
                      remotehost=None, vdev=None, skipdiskcopy=False):
@@ -1668,13 +1727,23 @@ class SMTClient(object):
             mac = ''.join(mac_addr.split(':'))[6:]
             requestData += ' -k mac_id=%s' % mac
 
-        try:
-            self._request(requestData)
-        except exception.SDKSMTRequestFailed as err:
-            LOG.error("Failed to create nic %s for user %s in "
-                      "the guest's user direct, error: %s" %
-                      (vdev, userid, err.format_message()))
-            self._create_nic_inactive_exception(err, userid, vdev)
+        retry = 1
+        for secs in [1, 3, 5, 8, -1]:
+            try:
+                self._request(requestData)
+                break
+            except exception.SDKSMTRequestFailed as err:
+                if (err.results['rc'] == 400 and
+                    err.results['rs'] == 12 and
+                    retry < 5):
+                    LOG.info("The VM is locked, will retry")
+                    time.sleep(secs)
+                    retry += 1
+                else:
+                    LOG.error("Failed to create nic %s for user %s in "
+                              "the guest's user direct, error: %s" %
+                              (vdev, userid, err.format_message()))
+                    self._create_nic_inactive_exception(err, userid, vdev)
 
         if active:
             if mac_addr is not None:
@@ -1912,27 +1981,6 @@ class SMTClient(object):
         if active:
             self._is_active(userid)
 
-        msg = ('Start to couple nic device %(vdev)s of guest %(vm)s '
-               'with vswitch %(vsw)s'
-                % {'vdev': vdev, 'vm': userid, 'vsw': vswitch_name})
-        LOG.info(msg)
-        requestData = ' '.join((
-            'SMAPI %s' % userid,
-            "API Virtual_Network_Adapter_Connect_Vswitch_DM",
-            "--operands",
-            "-v %s" % vdev,
-            "-n %s" % vswitch_name))
-
-        try:
-            self._request(requestData)
-        except exception.SDKSMTRequestFailed as err:
-            LOG.error("Failed to couple nic %s to vswitch %s for user %s "
-                      "in the guest's user direct, error: %s" %
-                      (vdev, vswitch_name, userid, err.format_message()))
-            self._couple_inactive_exception(err, userid, vdev, vswitch_name)
-
-        # the inst must be active, or this call will failed
-        if active:
             requestData = ' '.join((
                 'SMAPI %s' % userid,
                 'API Virtual_Network_Adapter_Connect_Vswitch',
@@ -1987,7 +2035,7 @@ class SMTClient(object):
         LOG.info(msg)
 
     def couple_nic_to_vswitch(self, userid, nic_vdev,
-                              vswitch_name, active=False):
+                              vswitch_name, active=False, vlan_id=-1):
         """Couple nic to vswitch."""
         if active:
             msg = ("both in the user direct of guest %s and on "
@@ -1996,6 +2044,61 @@ class SMTClient(object):
             msg = "in the user direct of guest %s" % userid
         LOG.debug("Connect nic %s to switch %s %s",
                   nic_vdev, vswitch_name, msg)
+
+        # previously we use Virtual_Network_Adapter_Connect_Vswitch_DM
+        # but due to limitation in SMAPI, we have to create such user
+        # direct by our own due to no way to add VLAN ID
+
+        msg = ('Start to couple nic device %(vdev)s of guest %(vm)s '
+               'with vswitch %(vsw)s with vlan %(vlan_id)s:'
+                % {'vdev': nic_vdev, 'vm': userid, 'vsw': vswitch_name,
+                   'vlan_id': vlan_id})
+        LOG.info(msg)
+
+        user_direct = self.get_user_direct(userid)
+        new_user_direct = []
+        nicdef = "NICDEF %s" % nic_vdev
+        for ent in user_direct:
+            if len(ent) > 0:
+                new_user_direct.append(ent)
+                if ent.upper().startswith(nicdef):
+                    # vlan_id < 0 means no VLAN ID given
+                    v = nicdef
+                    if vlan_id < 0:
+                        v += " LAN SYSTEM %s" % vswitch_name
+                    else:
+                        v += " LAN SYSTEM %s VLAN %s" % (vswitch_name, vlan_id)
+
+                    new_user_direct.append(v)
+        try:
+            self._lock_user_direct(userid)
+        except exception.SDKSMTRequestFailed as e:
+            raise exception.SDKGuestOperationError(rs=9, userid=userid,
+                                                   err=e.format_message())
+        # Replace user directory
+        try:
+            self._replace_user_direct(userid, new_user_direct)
+        except exception.SDKSMTRequestFailed as e:
+            rd = ("SMAPI %s API Image_Unlock_DM " % userid)
+            try:
+                self._request(rd)
+            except exception.SDKSMTRequestFailed as err2:
+                # ignore 'not locked' error
+                if ((err2.results['rc'] == 400) and (
+                    err2.results['rs'] == 24)):
+                    LOG.debug("Guest '%s' unlocked successfully." % userid)
+                    pass
+                else:
+                    # just print error and ignore this unlock error
+                    msg = ("Unlock definition of guest '%s' failed "
+                           "with SMT error: %s" %
+                           (userid, err2.format_message()))
+                    LOG.error(msg)
+
+            raise exception.SDKGuestOperationError(rs=10,
+                                                   userid=userid,
+                                                   err=e.format_message())
+
         self._couple_nic(userid, nic_vdev, vswitch_name, active=active)
 
     def _uncouple_active_exception(self, error, userid, vdev):
@@ -2114,6 +2217,12 @@ class SMTClient(object):
             if err.results['rc'] == 596 and err.results['rs'] == 6831:
                 # 596/6831 means delete VM not finished yet
                 LOG.warning("The guest %s deleted with 596/6831" % userid)
+                return
+
+            # ignore delete VM with VDISK format error
+            # DirMaint does not support formatting TDISK or VDISK extents.
+            if err.results['rc'] == 596 and err.results['rs'] == 3543:
+                LOG.debug("The guest %s deleted with 596/3543" % userid)
                 return
 
             msg = "SMT error: %s" % err.format_message()
@@ -3443,6 +3552,26 @@ class SMTClient(object):
                       "make the defined cpus online." % (userid, msg))
             raise exception.SDKGuestOperationError(rs=8, userid=userid,
                                                    err=msg)
+
+        uname_out = self.execute_cmd(userid, "uname -a")
+        if uname_out and len(uname_out) >= 1:
+            distro = uname_out[0]
+        else:
+            distro = ''
+        if 'ubuntu' in distro or 'Ubuntu' in distro \
+                or 'UBUNTU' in distro:
+            try:
+                # need use chcpu -e <cpu-list> to make cpu online for Ubuntu
+                online_cmd = "chcpu -e " + ','.join(active_new)
+                self.execute_cmd(userid, online_cmd)
+            except exception.SDKSMTRequestFailed as err:
+                msg = err.format_message()
+                LOG.error("Enable cpus for guest: '%s' failed with error: %s. "
+                          "No rollback is done and you may need to check the "
+                          "status and restart the guest to make the defined "
+                          "cpus online." % (userid, msg))
+                raise exception.SDKGuestOperationError(rs=15, userid=userid,
+                                                       err=msg)
         LOG.info("Live resize cpus for guest: '%s' finished successfully."
                  % userid)
 
@@ -3561,7 +3690,14 @@ class SMTClient(object):
             action = 1
             # get the new reserved memory size
             new_reserved = max_mem - size
+            # get maximum reserved memory value
+            MAX_STOR_RESERVED = int(zvmutils.convert_to_mb(
+                        CONF.zvm.user_default_max_reserved_memory))
 
+            # when new reserved memory value > the MAX_STOR_RESERVED,
+            # make is as the MAX_STOR_RESERVED value
+            if new_reserved > MAX_STOR_RESERVED:
+                new_reserved = MAX_STOR_RESERVED
             # prepare the new user entry content
             entry_str = ""
             for ent in user_direct:
@@ -3631,23 +3767,30 @@ class SMTClient(object):
     def _get_active_memory(self, userid):
         # Return an integer value representing the active memory size in mb
         output = self.execute_cmd(userid, "lsmem")
-        # cmd output contains following line:
-        # Total online memory : 8192 MB
         active_mem = 0
         for e in output:
-            if e.startswith("Total online memory : "):
+            # cmd output contains line starts with "Total online memory",
+            # its format can be like:
+            # "Total online memory : 8192 MB"
+            # or
+            # "Total online memory: 8G"
+            # need handle both formats
+            if e.startswith("Total online memory"):
                 try:
-                    mem_info = e.split(' : ')[1].split(' ')
-                    # sample mem_info: [u'2048', u'MB']
-                    active_mem = int(zvmutils.convert_to_mb(mem_info[0] +
-                                                            mem_info[1][0]))
-                except (IndexError, ValueError, KeyError, TypeError):
+                    # sample mem_info_str: "8192MB" or "8G"
+                    mem_info_str = e.split(':')[1].replace(' ', '').upper()
+                    # make mem_info as "8192M" or "8G"
+                    if mem_info_str.endswith('B'):
+                        mem_info = mem_info_str[:-1]
+                    else:
+                        mem_info = mem_info_str
+                    active_mem = int(zvmutils.convert_to_mb(mem_info))
+                except (IndexError, ValueError, KeyError, TypeError) as e:
                     errmsg = ("Failed to get active storage size for guest: %s"
                               % userid)
-                    LOG.error(errmsg)
+                    LOG.error(errmsg + " with error: " + six.text_type(e))
                     raise exception.SDKInternalError(msg=errmsg)
                 break
-
         return active_mem
 
     def live_resize_memory(self, userid, memory):
@@ -3666,6 +3809,21 @@ class SMTClient(object):
                                              userid=userid,
                                              active=active_size,
                                              req=size)
+        # get maximum reserved memory value
+        MAX_STOR_RESERVED = int(zvmutils.convert_to_mb(
+                        CONF.zvm.user_default_max_reserved_memory))
+        # The maximum increased memory size in one live resizing can't
+        # exceed MAX_STOR_RESERVED
+        increase_size = size - active_size
+        if increase_size > MAX_STOR_RESERVED:
+            LOG.error("Live memory resize for guest '%s' cann't be done. "
+                      "The memory size to be increased: '%im' is greater "
+                      " than the maximum reserved memory size: '%im'." %
+                      (userid, increase_size, MAX_STOR_RESERVED))
+            raise exception.SDKConflictError(modID='guest', rs=21,
+                                             userid=userid,
+                                             inc=increase_size,
+                                             max=MAX_STOR_RESERVED)
 
         # Static resize memory. (increase/decrease memory from user directory)
         (action, defined_mem, max_mem,
@@ -3682,7 +3840,6 @@ class SMTClient(object):
             return
         else:
             # Do live resize. update memory size
-            increase_size = size - active_size
             # Step1: Define new standby storage
             cmd_str = ("vmcp def storage standby %sM" % increase_size)
             try:

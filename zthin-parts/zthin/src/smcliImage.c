@@ -15,6 +15,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/types.h>
 #include "smcliImage.h"
 #include "wrapperutils.h"
 
@@ -4012,7 +4013,11 @@ int imagePause(int argC, char* argV[], struct _vmApiInternalContext* vmapiContex
     }
 
     // Check that the image being paused is not this Linux image
-    fp = popen("sudo /sbin/vmcp q userid", "r");
+    if (getuid() == 0) {
+        fp = popen("/sbin/vmcp q userid", "r");
+    } else {
+        fp = popen("sudo /sbin/vmcp q userid", "r");
+    }
     if (fp == NULL) {
         printAndLogProcessingErrors(MY_API_NAME, PROCESSING_ERROR, vmapiContextP, "", 0);
         printf("ERROR: Failed to identify the user");
@@ -4472,10 +4477,10 @@ int imageSCSICharacteristicsDefineDM(int argC, char* argV[], struct _vmApiIntern
     int rc;
     int option;
     char * image = NULL;
-    char * bootProgram = NULL;
-    char * logicalBlock = NULL;
-    char * lun = NULL;
-    char * portName = NULL;
+    char * bootProgram = "";
+    char * logicalBlock = "";
+    char * lun = "";
+    char * portName = "";
     int scpType = -1;
     char * scpData = NULL;
     vmApiImageScsiCharacteristicsDefineDmOutput* output;
@@ -4577,7 +4582,7 @@ int imageSCSICharacteristicsDefineDM(int argC, char* argV[], struct _vmApiIntern
                 return 1;
         }
 
-    if (!image || !bootProgram || !logicalBlock || !lun || !portName || (scpType < 0) ) {      
+    if (!image || (scpType < 0)) {
         DOES_CALLER_WANT_RC_HEADER_SYNTAX_ERROR(vmapiContextP);
         printf("ERROR: Missing required options\n");
         return 1;

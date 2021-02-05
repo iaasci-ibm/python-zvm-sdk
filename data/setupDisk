@@ -582,6 +582,19 @@ function setupDisk {
       echo "The disk $xcat_vaddr has been mounted to $xcat_mntdir in format $xcat_filesys successfully"
     fi
 
+    # in case it's VDISK, this is the only chance that we can do the swap setup
+    # and if it's not VDISK, mkswap again do no harm
+    if [[ $xcat_filesys == swap ]]; then
+      mkswap /dev/disk/by-path/ccw-0.0.${xcat_vaddr}-part1
+
+      # this is because we need ask /etc/rc.d/rc.local to include swap disk setup
+      # because VDISK will be setup every time and need format every time Linux startup
+      # actually with those scripts, we don't need run them now, can defer to VM startup phase
+      echo "mkswap /dev/disk/by-path/ccw-0.0.${xcat_vaddr}-part1" >> /etc/rc.d/rc.local
+      echo "swapon -a" >> /etc/rc.d/rc.local
+      chmod +x /etc/rc.d/rc.local
+    fi
+
     out=`swapon -a`
     if [[ "$out" ]]; then
       echo "Failed to swapon swap partition with reason $out"

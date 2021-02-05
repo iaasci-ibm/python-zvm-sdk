@@ -497,7 +497,11 @@ function mount_boot_partition {
     while true
     do
         eval $(lsblk "${DEST_DEV}" --output LABEL,NAME --pairs | grep 'LABEL="boot' | tr ' ' '\n' | tail -n 1)
-        mount "/dev/${NAME}" "$mountpoint"
+        if [[ ${NAME} =~ "mpath" ]]; then
+            mount "/dev/mapper/${NAME}" "$mountpoint"
+        else
+            mount "/dev/${NAME}" "$mountpoint"
+        fi
         RETCODE=$?
         if [[ $RETCODE -ne 0 ]]; then
             if [[ $retry -lt 30 ]]; then
@@ -576,7 +580,7 @@ function deployDiskImage {
           exit 3
         fi
       else
-        printError "Target disk is too small for specified image."
+        printError "Target disk is too small for specified image, required:$targetDiskSize cylinders, given:$diskSize cylinders"
         exit 3
       fi
 
@@ -842,7 +846,7 @@ function deployDiskImage {
         nameserver2='nameserver='${nameserver2}
     fi
     
-    echo "$(grep options $blsfile | cut -d' ' -f2-) rd.zfcp=0.0.$fcpChannel,$wwpn,$lun zfcp.allow_lun_scan=0 rd.znet=qeth,$nicID,layer2=1,portno=0 ignition.firstboot=1 rd.neednet=1 ip=$ipConfig $nameserver1 $nameserver2" > /tmp/$fcpChannel/zipl_prm
+    echo "$(grep options $blsfile | cut -d' ' -f2-) rd.zfcp=0.0.$fcpChannel,$wwpn,$lun rd.znet=qeth,$nicID,layer2=1,portno=0 ignition.firstboot=1 rd.neednet=1 ip=$ipConfig $nameserver1 $nameserver2" > /tmp/$fcpChannel/zipl_prm
     #Run zipl to update bootloader
     zipl --verbose -p /tmp/$fcpChannel/zipl_prm -i $(ls /tmp/$fcpChannel/boot_partition/ostree/*/*vmlinuz*) -r $(ls /tmp/$fcpChannel/boot_partition/ostree/*/*initramfs*) --target /tmp/$fcpChannel/boot_partition
     if [[ $? -ne 0 ]]; then
@@ -1007,7 +1011,7 @@ function deployDiskImage {
           exit 3
         fi
       else
-        printError "Target disk is too small for specified image."
+        printError "Target disk is too small for specified image, required:$targetDiskSize blocks, given:$diskSize blocks"
         exit 3
       fi
 
@@ -1093,7 +1097,7 @@ function deployDiskImage {
         exit 3
       fi
     else
-      printError "Target disk is too small for specified image."
+      printError "Target disk is too small for specified image, required:$targetDiskSize bytes, given:$diskSize bytes"
       exit 3
     fi
   } #deployFCPImage{}
@@ -1151,28 +1155,11 @@ function deployDiskImage {
     #the first 2 tracks of the ECKD DASD are reserved
     first_track=2
 
-    # To check is GPT partition or not, from the 2nd block of source image
-    gptSig=$(hexdump -C -n 8 -s 4096 ${imageFile} | head -n 1)
-    if [[ $gptSig =~ "EFI PART" ]]; then
-        # Per GPT partition schema, the partition entries start from the
-        # beginning of 3rd block(offset 8192), each partition entry with 128
-        # bytes length.
-        # In one partition entry, the first LBA offset 32, length 8 bytes,
-        # the last LBA offset 40, length 8 bytes.
-        inform "The source image has GPT partitions"
-
-        # The first partion entry is boot, start from 8192, first LBA offset 32
-        tempStr=$(hexdump -C -n 16 -s 8224 ${imageFile} | awk '{print $9 $8 $7 $6 $5 $4 $3 $2 $17 $16 $15 $14 $13 $12 $11 $10}')
-        boot_partition=( $((0x${tempStr:0:16})) $((0x${tempStr:16})) )
-
-        # The 4th partion entry is root, start from 8576, first LBA offset 32
-        tempStr=$(hexdump -C -n 16 -s 8608 ${imageFile} | awk '{print $9 $8 $7 $6 $5 $4 $3 $2 $17 $16 $15 $14 $13 $12 $11 $10}')
-        root_partition=( $((0x${tempStr:0:16})) $((0x${tempStr:16})) )
-    else
-        partition_Num=($(fdisk -b 4096 -l ${imageFile} | grep "${imageFile}p*[0-9]" | wc -l))
-        boot_partition=($(fdisk -b 4096 -l ${imageFile} | grep "${imageFile}p*1" | awk '{print $2,$4}'))
-        root_partition=($(fdisk -b 4096 -l ${imageFile} | grep "${imageFile}p*${partition_Num}" | awk '{print $2,$4}'))
-    fi
+    # Get boot partition and root partition of target disk
+    inform "Get boot and root partitions..."
+    inform "(Warning) It is recommended to use 2.32.1 and later version fdisk which we have tested to work well."
+    boot_partition=($(fdisk -b 4096 -l ${imageFile} | grep "${imageFile}p*[0-9]" | head -n 1 | awk '{print $2,$4}'))
+    root_partition=($(fdisk -b 4096 -l ${imageFile} | grep "${imageFile}p*[0-9]" | tail -n 1 | head -n 2 | awk '{print $2,$4}'))
     boot_partition+=( $first_track $(( (${boot_partition[1]} + $block_per_tracks - 1) / $block_per_tracks )) )
     root_partition+=($(( ${boot_partition[2]} + ${boot_partition[3]} )) "last")
     mkdir -p /tmp/${userID} && touch /tmp/${userID}/fdasd_conf
@@ -1336,7 +1323,41 @@ function cleanup {
       rm -rf /tmp/${userID}
     fi
   else
+    multipath_enabled=0
+    service_output=`systemctl status multipathd | grep "active (running)"`
+    if [[ $? -eq 0 ]]; then
+      inform "multipathd service is active and running."
+      multipath_enabled=1
+    fi
+
+    if [[ $multipath_enabled == 1 ]]; then
+      fcp_disk_path=/dev/disk/by-path/ccw-0.0.${fcpChannel}-zfcp-${wwpn}:${lun}
+      wwid=`/usr/lib/udev/scsi_id --whitelisted ${fcp_disk_path} 2> /dev/null`
+
+      # discover mpath before flush
+      multipath
+      multipath_output=$(multipath -ll 2>&1)
+      inform "multipath output: ${multipath_output}."
+      map_name=$(multipath -l $wwid -v 1)
+
+      inform "Cleaning up multipath bindings and wwids: ${map_name} ${wwid}"
+      # delete the wwid and refresh multipath map
+      multipath -w ${map_name} 1>/dev/null
+      multipath -f ${map_name} 1>/dev/null
+      if [[ -f /etc/multipath/bindings ]]; then
+        sed -i "/${wwid}/d" /etc/multipath/bindings
+      fi
+      lszfcp_output=$(lszfcp -HD 2>&1)
+      inform "lszfcp output: ${lszfcp_output}"
+      multipath_output=$(multipath -ll 2>&1)
+      inform "multipath output: ${multipath_output}."
+      inform "Finish refreshing multipath bindings: ${fcp_disk_path}"
+    fi
+
+    # disconnect FCP
     disconnectFcp ${fcpChannel} ${wwpn} ${lun}
+
+
     if [[ $diskType ]]; then
       rm -rf /tmp/${fcpChannel}
     fi

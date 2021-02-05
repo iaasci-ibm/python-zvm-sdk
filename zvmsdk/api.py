@@ -81,16 +81,19 @@ class SDKAPI(object):
         self._NetworkDbOperator = database.NetworkDbOperator()
 
     @check_guest_exist()
-    def guest_start(self, userid):
+    def guest_start(self, userid, timeout=0):
         """Power on a virtual machine.
 
         :param str userid: the id of the virtual machine to be power on
+        :param int timeout: the timeout of waiting virtual machine reachable
+                            default as 0, which mean not wait for virtual
+                            machine reachable status
 
         :returns: None
         """
         action = "start guest '%s'" % userid
         with zvmutils.log_and_reraise_sdkbase_error(action):
-            self._vmops.guest_start(userid)
+            self._vmops.guest_start(userid, timeout)
 
     @check_guest_exist()
     def guest_stop(self, userid, **kwargs):
@@ -279,12 +282,15 @@ class SDKAPI(object):
         disk pool type and pool name, eg "ECKD:eckdpool" or "FBA:fbapool"
         :returns: Dictionary describing disk pool usage info
         """
-        # disk_pool must be assigned. disk_pool default to None because
+        # disk_pool is optional. disk_pool default to None because
         # it is more convenient for users to just type function name when
-        # they want to get the disk pool info of CONF.zvm.disk_pool
+        # they want to get the disk pool info of CONF.zvm.disk_pool.
+        # The default value of CONF.zvm.disk_pool is None, if it's configured,
+        # the format must be "ECKD:eckdpool" or "FBA:fbapool".
+        disk_pool = disk_pool or CONF.zvm.disk_pool
         if disk_pool is None:
-            disk_pool = CONF.zvm.disk_pool
-
+            # Return 0 directly if disk_pool not configured
+            return {'disk_total': 0, 'disk_used': 0, 'disk_available': 0}
         if ':' not in disk_pool:
             msg = ('Invalid input parameter disk_pool, expect ":" in'
                    'disk_pool, eg. ECKD:eckdpool')
@@ -739,12 +745,18 @@ class SDKAPI(object):
                'disk_pool': 'ECKD:eckdpool1'},
                {'size': '200000',
                'disk_pool': 'FBA:fbapool1',
-               'format': 'ext3'}]
+               'format': 'ext3'},
+               {'size': '1g',
+                'format': 'ext3'}]
                In this case it will create one disk 0100(in case the vdev
                for root disk is 0100) with size 1g from ECKD disk pool
                eckdpool1 for guest , then set IPL 0100 in guest's user
                directory, and it will create 0101 with 200000 blocks from
-               FBA disk pool fbapool1, and formated with ext3.
+               FBA disk pool fbapool1, and formated with ext3. As for the third
+               case, if the disk_pool isn't configured in configure file, the
+               default value is None, the disk_pool here is None, report error.
+               If it's configured, such as ECKD:eckdpool2, it will
+               create 0102 with size 1g from ECKD diskpool eckdpool2 for guest.
         :param user_profile: (str) the profile for the guest
         :param max_cpu: (int) the maximum number of virtual cpu this user can
                define. The value should be a decimal value between 1 and 64.
@@ -770,6 +782,15 @@ class SDKAPI(object):
 
         userid = userid.upper()
         if disk_list:
+
+            # special case for swap disk, for boot from volume, might add swap
+            # disk but not disk pool given, then we use vdisk instead
+            swap_only = False
+            if len(disk_list) == 1:
+                disk = disk_list[0]
+                if 'format' in disk and disk['format'].lower() == 'swap':
+                    swap_only = True
+
             for disk in disk_list:
                 if not isinstance(disk, dict):
                     errmsg = ('Invalid "disk_list" input, it should be a '
@@ -782,14 +803,34 @@ class SDKAPI(object):
                               'for each disk.')
                     LOG.error(errmsg)
                     raise exception.SDKInvalidInputFormat(msg=errmsg)
-                # 'disk_pool' format check
+
+                # check disk_pool
                 disk_pool = disk.get('disk_pool') or CONF.zvm.disk_pool
-                if ':' not in disk_pool or (disk_pool.split(':')[0].upper()
-                    not in ['ECKD', 'FBA']):
-                    errmsg = ("Invalid disk_pool input, it should be in format"
-                              " ECKD:eckdpoolname or FBA:fbapoolname")
-                    LOG.error(errmsg)
-                    raise exception.SDKInvalidInputFormat(msg=errmsg)
+                if not swap_only:
+                    if disk_pool is None:
+                        errmsg = ("Invalid disk_pool input, disk_pool should"
+                                  " be configured for sdkserver.")
+                        LOG.error(errmsg)
+                        raise exception.SDKInvalidInputFormat(msg=errmsg)
+                    # 'disk_pool' format check
+                    if ':' not in disk_pool or (disk_pool.split(':')[0].upper()
+                        not in ['ECKD', 'FBA']):
+                        errmsg = ("Invalid disk_pool input, its format must be"
+                                  " ECKD:eckdpoolname or FBA:fbapoolname")
+                        LOG.error(errmsg)
+                        raise exception.SDKInvalidInputFormat(msg=errmsg)
+                else:
+                    # in this case, it's swap only, and we will check whether
+                    # no VDISK is allowed, if not allow, then return error
+                    if disk_pool is None and CONF.zvm.swap_force_mdisk:
+                        errmsg = ("Invalid disk_pool input, disk_pool should"
+                                  " be configured for sdkserver and use"
+                                  " VDISK as swap disk is not configured."
+                                  " check CONF.zvm.swap_force_mdisk for"
+                                  " additional information.")
+                        LOG.error(errmsg)
+                        raise exception.SDKInvalidInputFormat(msg=errmsg)
+
                 # 'format' value check
                 if ('format' in disk.keys()) and (disk['format'].lower() not in
                                                   ('ext2', 'ext3', 'ext4',
@@ -921,18 +962,38 @@ class SDKAPI(object):
                'disk_pool': 'ECKD:eckdpool1'},
                {'size': '200000',
                'disk_pool': 'FBA:fbapool1',
-               'format': 'ext3'}]
+               'format': 'ext3'},
+               {'size': '1g',
+                'format': 'ext3'}]
                In this case it will create one disk 0100(in case the vdev
                for root disk is 0100) with size 1g from ECKD disk pool
                eckdpool1 for guest , then set IPL 0100 in guest's user
                directory, and it will create 0101 with 200000 blocks from
-               FBA disk pool fbapool1, and formated with ext3.
+               FBA disk pool fbapool1, and formated with ext3. As for the third
+               case, if the disk_pool isn't configured in configure file, the
+               default value is None, the disk_pool here is None, report error.
+               If it's configured, such as ECKD:eckdpool2, it will
+               create 0102 with size 1g from ECKD diskpool eckdpool2 for guest.
         """
         if disk_list == [] or disk_list is None:
             # nothing to do
             LOG.debug("No disk specified when calling guest_create_disks, "
                       "nothing happened")
             return
+
+        for disk in disk_list:
+            if not isinstance(disk, dict):
+                errmsg = ('Invalid "disk_list" input, it should be a '
+                          'dictionary. Details could be found in doc.')
+                LOG.error(errmsg)
+                raise exception.SDKInvalidInputFormat(msg=errmsg)
+            # check disk_pool
+            disk_pool = disk.get('disk_pool') or CONF.zvm.disk_pool
+            if disk_pool is None:
+                errmsg = ("Invalid disk_pool input, it should be configured"
+                          " for sdkserver.")
+                LOG.error(errmsg)
+                raise exception.SDKInvalidInputFormat(msg=errmsg)
 
         action = "create disks '%s' for guest '%s'" % (str(disk_list), userid)
         with zvmutils.log_and_reraise_sdkbase_error(action):
@@ -953,16 +1014,18 @@ class SDKAPI(object):
 
     @check_guest_exist()
     def guest_nic_couple_to_vswitch(self, userid, nic_vdev,
-                                    vswitch_name, active=False):
+                                    vswitch_name, active=False, vlan_id=-1):
         """ Couple nic device to specified vswitch.
 
         :param str userid: the user's name who owns the nic
         :param str nic_vdev: nic device number, 1- to 4- hexadecimal digits
         :param str vswitch_name: the name of the vswitch
         :param bool active: whether make the change on active guest system
+        :param str vlan_id: the VLAN ID of the NIC
         """
         self._networkops.couple_nic_to_vswitch(userid, nic_vdev,
-                                               vswitch_name, active=active)
+                                               vswitch_name, active=active,
+                                               vlan_id=vlan_id)
 
     @check_guest_exist()
     def guest_nic_uncouple_from_vswitch(self, userid, nic_vdev,
@@ -1478,7 +1541,7 @@ class SDKAPI(object):
         :param list of fcpchannels
         :param list of wwpns
         :param string lun
-        :param boolean skipzipl: whether ship zipl, only return physical wwpns
+        :param boolean skipzipl: whether ship zipl, only return valid paths
         """
         return self._volumeop.volume_refresh_bootmap(fcpchannels, wwpns, lun,
                                                      skipzipl=skipzipl)

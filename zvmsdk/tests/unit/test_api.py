@@ -110,6 +110,70 @@ class SDKAPITestCase(base.SDKTestCase):
                                   '', '', '', [], {})
 
     @mock.patch("zvmsdk.vmops.VMOps.create_vm")
+    def test_guest_create_with_no_disk_pool(self, create_vm):
+        disk_list = [{'size': '1g', 'is_boot_disk': True,
+                      'disk_pool': 'ECKD: eckdpool1'},
+                     {'size': '1g', 'format': 'ext3'},
+                     {'size': '1g', 'format': 'swap'}]
+        vcpus = 1
+        memory = 1024
+        user_profile = 'profile'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'disk_pool', None)
+        self.assertRaises(exception.SDKInvalidInputFormat,
+                          self.api.guest_create, self.userid, vcpus,
+                          memory, disk_list, user_profile,
+                          max_cpu, max_mem)
+        create_vm.assert_not_called()
+
+    @mock.patch("zvmsdk.vmops.VMOps.create_vm")
+    def test_guest_create_with_no_disk_pool_swap_only(self, create_vm):
+        disk_list = [{'size': '1g', 'format': 'swap'}]
+        vcpus = 1
+        memory = 1024
+        user_profile = 'profile'
+        base.set_conf('zvm', 'disk_pool', None)
+        base.set_conf('zvm', 'swap_force_mdisk', False)
+        self.api.guest_create(self.userid, vcpus, memory, disk_list,
+                              user_profile)
+        create_vm.assert_called_once_with(self.userid, vcpus, memory,
+                                          disk_list, user_profile, 32, '64G',
+                                          '', '', '', [], {})
+
+    @mock.patch("zvmsdk.vmops.VMOps.create_vm")
+    def test_guest_create_no_disk_pool_force_mdisk(self, create_vm):
+        disk_list = [{'size': '1g', 'is_boot_disk': True,
+                      'disk_pool': 'ECKD: eckdpool1'},
+                     {'size': '1g', 'format': 'ext3'},
+                     {'size': '1g', 'format': 'swap'}]
+        vcpus = 1
+        memory = 1024
+        user_profile = 'profile'
+        max_cpu = 10
+        max_mem = '4G'
+        # should be no side effect at all
+        base.set_conf('zvm', 'swap_force_mdisk', True)
+        base.set_conf('zvm', 'disk_pool', None)
+        self.assertRaises(exception.SDKInvalidInputFormat,
+                          self.api.guest_create, self.userid, vcpus,
+                          memory, disk_list, user_profile,
+                          max_cpu, max_mem)
+        create_vm.assert_not_called()
+
+    @mock.patch("zvmsdk.vmops.VMOps.create_vm")
+    def test_guest_create_no_disk_pool_swap_only_force_mdisk(self, create_vm):
+        disk_list = [{'size': '1g', 'format': 'swap'}]
+        vcpus = 1
+        memory = 1024
+        user_profile = 'profile'
+        base.set_conf('zvm', 'disk_pool', None)
+        base.set_conf('zvm', 'swap_force_mdisk', True)
+        self.assertRaises(exception.SDKInvalidInputFormat,
+                          self.api.guest_create, self.userid, vcpus,
+                          memory, disk_list, user_profile)
+
+    @mock.patch("zvmsdk.vmops.VMOps.create_vm")
     def test_guest_create_with_default_max_cpu_memory(self, create_vm):
         vcpus = 1
         memory = 1024
@@ -232,6 +296,16 @@ class SDKAPITestCase(base.SDKTestCase):
         disk_list = [{'size': '1g'}]
         self.api.guest_create_disks(self.userid, disk_list)
         cds.assert_called_once_with(self.userid, disk_list)
+
+    @mock.patch("zvmsdk.vmops.VMOps.create_disks")
+    def test_guest_add_disks_no_disk_pool(self, cds):
+        disk_list = [{'size': '1g', 'is_boot_disk': True,
+                      'disk_pool': 'ECKD: eckdpool1'},
+                     {'size': '1g', 'format': 'ext3'}]
+        base.set_conf('zvm', 'disk_pool', None)
+        self.assertRaises(exception.SDKInvalidInputFormat,
+                          self.api.guest_create_disks, self.userid, disk_list)
+        cds.ssert_not_called()
 
     @mock.patch("zvmsdk.vmops.VMOps.create_disks")
     def test_guest_add_disks_nothing_to_do(self, cds):
@@ -482,3 +556,12 @@ class SDKAPITestCase(base.SDKTestCase):
     def test_host_get_guest_list(self, guest_list):
         self.api.host_get_guest_list()
         guest_list.assert_called_once_with()
+
+    @mock.patch("zvmsdk.hostops.HOSTOps.diskpool_get_info")
+    def test_host_diskpool_get_info(self, dp_info):
+        base.set_conf('zvm', 'disk_pool', None)
+        results = self.api.host_diskpool_get_info()
+        self.assertEqual(results['disk_total'], 0)
+        self.assertEqual(results['disk_available'], 0)
+        self.assertEqual(results['disk_used'], 0)
+        dp_info.ssert_not_called()

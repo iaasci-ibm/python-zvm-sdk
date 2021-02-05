@@ -452,13 +452,15 @@ def installFS(rh, vaddr, mode, fileSystem, diskType):
         # Delete the existing partition in case the disk already
         # has a partition in it.
         cmd = "sudo /sbin/fdisk " + device + " << EOF\nd\nw\nEOF"
-        rh.printSysLog("Invoking: sudo /sbin/fdsik " + device +
+        rh.printSysLog("Invoking: sudo /sbin/fdisk " + device +
             " << EOF\\nd\\nw\\nEOF ")
         try:
             out = subprocess.check_output(cmd,
                 stderr=subprocess.STDOUT,
                 close_fds=True,
                 shell=True)
+            rh.printSysLog("Run `%s` success with output: %s"
+                           % (cmd, out))
             if isinstance(out, bytes):
                 out = bytes.decode(out)
         except CalledProcessError as e:
@@ -489,7 +491,8 @@ def installFS(rh, vaddr, mode, fileSystem, diskType):
                         stderr=subprocess.STDOUT,
                         close_fds=True,
                         shell=True)
-                    rh.printSysLog("Run `%s` successfully." % cmd)
+                    rh.printSysLog("Run `%s` success with output: %s"
+                                   % (cmd, out))
                     break
                 except CalledProcessError as e:
                     if sleep_secs > 0:

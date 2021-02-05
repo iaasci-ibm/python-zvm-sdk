@@ -17,6 +17,7 @@ import abc
 import re
 import shutil
 import six
+import threading
 import os
 
 from zvmsdk import config
@@ -107,6 +108,32 @@ class VolumeConfiguratorAPI(object):
         self._dist_manager = dist.LinuxDistManager()
         self._smtclient = smtclient.get_smtclient()
 
+    def check_IUCV_is_ready(self, assigner_id):
+        # Make sure the iucv channel is ready for communication with VM
+        ready = True
+        try:
+            self._smtclient.execute_cmd(assigner_id, 'pwd')
+        except exception.SDKSMTRequestFailed as err:
+            if 'UNAUTHORIZED_ERROR' in err.format_message():
+                # If unauthorized, we must raise exception
+                errmsg = err.results['response'][0]
+                msg = ('IUCV failed to get authorization from VM %(vm)s with '
+                        'error %(err)s' % {'vm': assigner_id,
+                                           'err': errmsg})
+                LOG.error(msg)
+                raise exception.SDKVolumeOperationError(rs=6,
+                                                        userid=assigner_id,
+                                                        msg=errmsg)
+            else:
+                # In such case, we can continue without raising exception
+                ready = False
+                msg = ('Failed to connect VM %(vm)s with error '
+                       '%(err)s, assume it is OFF status '
+                       'and continue' % {'vm': assigner_id,
+                                         'err': err.results['response'][0]})
+                LOG.debug(msg)
+        return ready
+
     def config_attach(self, fcp, assigner_id, target_wwpns, target_lun,
                       multipath, os_version, mount_point, new,
                       need_restart=True):
@@ -114,8 +141,9 @@ class VolumeConfiguratorAPI(object):
         self.configure_volume_attach(fcp, assigner_id, target_wwpns,
                                      target_lun, multipath, os_version,
                                      mount_point, linuxdist, new)
-        # active mode should restart zvmguestconfigure to execute reader file
-        if need_restart and self._vmop.is_reachable(assigner_id):
+        iucv_is_ready = self.check_IUCV_is_ready(assigner_id)
+        if need_restart and iucv_is_ready:
+            # active mode should restart zvmguestconfigure to run reader file
             active_cmds = linuxdist.create_active_net_interf_cmd()
             self._smtclient.execute_cmd(assigner_id, active_cmds)
 
@@ -126,8 +154,9 @@ class VolumeConfiguratorAPI(object):
         self.configure_volume_detach(fcp, assigner_id, target_wwpns,
                                      target_lun, multipath, os_version,
                                      mount_point, linuxdist, connections)
-        # active mode should restart zvmguestconfigure to execute reader file
-        if need_restart and self._vmop.is_reachable(assigner_id):
+        iucv_is_ready = self.check_IUCV_is_ready(assigner_id)
+        if need_restart and iucv_is_ready:
+            # active mode should restart zvmguestconfigure to run reader file
             active_cmds = linuxdist.create_active_net_interf_cmd()
             self._smtclient.execute_cmd(assigner_id, active_cmds)
 
@@ -191,6 +220,7 @@ class VolumeConfiguratorAPI(object):
 class FCP(object):
     def __init__(self, init_info):
         self._dev_no = None
+        self._dev_status = None
         self._npiv_port = None
         self._chpid = None
         self._physical_port = None
@@ -207,6 +237,11 @@ class FCP(object):
     def _get_dev_number_from_line(info_line):
         dev_no = info_line.split(':')[-1].strip().lower()
         return dev_no if dev_no else None
+
+    @staticmethod
+    def _get_dev_status_from_line(info_line):
+        dev_status = info_line.split(':')[-1].strip().lower()
+        return dev_status if dev_status else None
 
     @staticmethod
     def _get_chpid_from_line(info_line):
@@ -227,12 +262,16 @@ class FCP(object):
         """
         if isinstance(init_info, list) and (len(init_info) == 5):
             self._dev_no = self._get_dev_number_from_line(init_info[0])
+            self._dev_status = self._get_dev_status_from_line(init_info[1])
             self._npiv_port = self._get_wwpn_from_line(init_info[2])
             self._chpid = self._get_chpid_from_line(init_info[3])
             self._physical_port = self._get_wwpn_from_line(init_info[4])
 
     def get_dev_no(self):
         return self._dev_no
+
+    def get_dev_status(self):
+        return self._dev_status
 
     def get_npiv_port(self):
         return self._npiv_port
@@ -396,7 +435,11 @@ class FCPManager(object):
         try:
             LOG.info("fcp %s found in CONF.volume.fcp_list, add it to db" %
                      fcp)
-            self.db.new(fcp, path)
+            if self._fcp_pool[fcp].get_dev_status() == 'free':
+                self.db.new(fcp, path)
+            else:
+                LOG.warning("fcp %s was not added into database because it is "
+                            "not in Free status." % fcp)
         except Exception:
             LOG.info("failed to add fcp %s into db", fcp)
 
@@ -481,7 +524,7 @@ class FCPManager(object):
         """Incrase fcp usage of given fcp
         Returns True if it's a new fcp, otherwise return False
         """
-        # get the sum of connections belong to assinger_id
+        # get the sum of connections belong to assigner_id
         connections = self.db.get_connections_from_fcp(fcp)
         new = False
         if connections == 0:
@@ -506,16 +549,34 @@ class FCPManager(object):
     def is_reserved(self, fcp):
         self.db.is_reserved(fcp)
 
-    def get_available_fcp(self, assigner_id):
+    def get_available_fcp(self, assigner_id, reserve):
         """get all the fcps not reserved, choose one from path0
            and choose another from path1, compose a pair to return.
            result will only have two FCP IDs, looks like [0011, 0021]
         """
         available_list = []
+        if not reserve:
+            # go here, means try to detach volumes, cinder still need the info
+            # of the FCPs belongs to assigner to do some cleanup jobs
+            fcp_list = self.db.get_from_assigner(assigner_id)
+            LOG.info("Got available fcp_list %s in Unreserve mode from %s."
+                     % (fcp_list, assigner_id))
+            # in this case, we just return the fcp_list
+            # no need to allocated new ones if fcp_list is empty
+            for old_fcp in fcp_list:
+                available_list.append(old_fcp[0])
+            return available_list
+
+        # go here, means try to attach volumes
         # first check whether this userid already has a FCP device
         # get the FCP devices belongs to assigner_id
-        fcp_list = self.db.get_from_assigner(assigner_id)
+        fcp_list = self.db.get_allocated_fcps_from_assigner(assigner_id)
+        LOG.info("Got available fcp_list %s in Reserve mode from %s."
+                 % (fcp_list, assigner_id))
         if not fcp_list:
+            # allocate new ones if fcp_list is empty
+            LOG.info("There is no allocated fcps for %s, will allocate "
+                     "new ones." % assigner_id)
             if CONF.volume.get_fcp_pair_with_same_index:
                 '''
                 If use get_fcp_pair_with_same_index,
@@ -540,14 +601,17 @@ class FCPManager(object):
                 # with the get_volume_connector call.
                 self.db.assign(item, assigner_id, update_connections=False)
 
-            LOG.debug("allocated %s fcp for %s assigner" %
+            LOG.info("allocated %s fcp for %s assigner" %
                       (available_list, assigner_id))
         else:
+            # reuse the old ones if fcp_list is not empty
+            LOG.info("Found allocated fcps %s for %s, will reuse them."
+                     % (fcp_list, assigner_id))
             path_count = self.db.get_path_count()
-            if len(fcp_list) < path_count:
+            if len(fcp_list) != path_count:
                 # TODO: handle the case when len(fcp_list) < multipath_count
                 LOG.warning("FCPs assigned to %s includes %s, "
-                            "it is less than the path count: %s." %
+                            "it is not equal to the path count: %s." %
                             (assigner_id, fcp_list, path_count))
             # we got it from db, let's reuse it
             for old_fcp in fcp_list:
@@ -574,6 +638,7 @@ class FCPVolumeManager(object):
         self.fcp_mgr = FCPManager()
         self.config_api = VolumeConfiguratorAPI()
         self._smtclient = smtclient.get_smtclient()
+        self._lock = threading.RLock()
         self.db = database.FCPDbOperator()
 
     def _dedicate_fcp(self, fcp, assigner_id):
@@ -612,7 +677,7 @@ class FCPVolumeManager(object):
         """
         LOG.info('Start to attach device to %s' % assigner_id)
         # TODO: init_fcp should be called in contructor function
-        # but no assinger_id in contructor
+        # but no assigner_id in contructor
         self.fcp_mgr.init_fcp(assigner_id)
         new = self.fcp_mgr.add_fcp_for_assigner(fcp, assigner_id)
         if is_root_volume:
@@ -643,8 +708,14 @@ class FCPVolumeManager(object):
         :param string lun
         :param boolean skipzipl: whether ship zipl, only return physical wwpns
         """
-        return self._smtclient.volume_refresh_bootmap(fcpchannels, wwpns, lun,
-                                                      skipzipl=skipzipl)
+        ret = None
+        with zvmutils.acquire_lock(self._lock):
+            LOG.debug('Enter lock scope of volume_refresh_bootmap.')
+            ret = self._smtclient.volume_refresh_bootmap(fcpchannels, wwpns,
+                                                         lun,
+                                                         skipzipl=skipzipl)
+        LOG.debug('Exit lock of volume_refresh_bootmap with ret %s.' % ret)
+        return ret
 
     def attach(self, connection_info):
         """Attach a volume to a guest
@@ -745,7 +816,8 @@ class FCPVolumeManager(object):
                 with zvmutils.ignore_errors():
                     new = (connections == 0)
                     self._add_disk(fcp, assigner_id, target_wwpns, target_lun,
-                                   multipath, os_version, mount_point, new)
+                                   multipath, os_version, mount_point, new,
+                                   need_restart)
                 raise exception.SDKBaseException(msg=errmsg)
 
         # Unreserved fcp device after undedicate all FCP devices
@@ -808,7 +880,7 @@ class FCPVolumeManager(object):
         # init fcp pool
         self.fcp_mgr.init_fcp(assigner_id)
         # fcp = self.fcp_mgr.find_and_reserve_fcp(assigner_id)
-        fcp_list = self.fcp_mgr.get_available_fcp(assigner_id)
+        fcp_list = self.fcp_mgr.get_available_fcp(assigner_id, reserve)
         if not fcp_list:
             errmsg = "No available FCP device found."
             LOG.error(errmsg)

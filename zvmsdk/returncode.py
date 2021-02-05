@@ -169,7 +169,10 @@ errors = {
                    "get unpackdiskimage cmd failed: %(err)s"),
                13: ("Failed to deploy image to userid: '%(userid)s', "
                    "ignition file is required when deploying RHCOS image"),
-               14: ("Failed to deploy image to userid: '%(userid)s', %(msg)s")
+               14: ("Failed to deploy image to userid: '%(userid)s', %(msg)s"),
+               15: ("Failed to live resize cpus of guest: '%(userid)s', "
+                   "error: enable new defined cpus failed: '%(err)s'."),
+               16: ("Failed to start the guest: '%(userid)s', %(msg)s")
               },
               "Operation on Guest failed"
               ],
@@ -233,6 +236,8 @@ errors = {
                 4: "Volume %(vol)s is not attached on instance %(inst)s",
                 5: "Refresh bootmap fails, error code: %(errcode)s and "
                    "reason: %(errmsg)s",
+                6: "IUCV failed to get authorization from instance "
+                   "%(userid)s with reason %(msg)s",
                 },
                "Operation on Volume failed"
                ],
@@ -309,6 +314,10 @@ errors = {
                   20: ("Failed to resize memory of guest: '%(userid)s', "
                       "error: the requested memory size: '%(req)im' exceeds "
                       "the maximum memory size defined: '%(max)im'."),
+                  21: ("Failed to live resize memory of guest: %(userid)s, "
+                      "error: the memory size to be increased: '%(inc)im' "
+                      "is greater than the maximum reserved memory size: "
+                      "'%(max)im'."),
                   },
                  "The operated object status conflict"
                  ],

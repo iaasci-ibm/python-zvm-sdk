@@ -99,9 +99,10 @@ When an ESM is installed, this parameter only governs when the ESM
 defers to CP's processing.
 
 Usage note:
-    The default is an empty string (''). When the string is empty, you can't
-    log on to your instances using the 3270 protocol; When a
-    non-empty string is provided, blank chars will be used as delimiter,
+    The default is empty string with nothing set.
+    '' is an invalid value and it will cause VM deploying failed.
+    Thus, DO NOT set default_admin_userid=''.
+    When a non-empty string is provided, blank chars will be used as delimiter,
     you can use LOGONBY xxx command to log on the guest using the corresponding
     admin userid's password.
 
@@ -113,8 +114,7 @@ Usage note:
 Possible values:
     A maximum of 8 blank-delimited strings. Each non-blank string must be a
     valid z/VM userid.
-    e.g  '' is a valid value.
-         'oper1 oper2' is a valid value.
+    e.g  'oper1 oper2' is a valid value.
          'o1 o2 o3 o4 o5 o6 o7 o8 o9' is NOT a valid value.
     '''),
     # FIXME: remove this option when switch to smt
@@ -122,7 +122,8 @@ Possible values:
         section='zvm'),
     Opt('disk_pool',
         section='zvm',
-        required=True,
+        default=None,
+        required=False,
         help='''
 zVM disk pool and type for root/ephemeral disks.
 
@@ -198,6 +199,19 @@ values such as 4096.8M or 32.5G are not supported.
 
 The value should be adjusted based on your system capacity.
 '''),
+    Opt('user_default_max_reserved_memory',
+        section='zvm',
+        default='64G',
+        help='''
+The default maximum size of reserved memory in a vm's direct entry.
+This value is used as the default value for maximum reserved memory
+size for a guest.
+The value can be specified by 1-4 bits of number suffixed by either
+M (Megabytes) or G (Gigabytes) and the number must be a whole number,
+values such as 4096.8M or 32.5G are not supported.
+
+The value should be adjusted based on your system capacity.
+'''),
     Opt('namelist',
         section='zvm',
         help='''
@@ -207,6 +221,16 @@ DMSSICNF COPY key: NameListFileIdAny. The list has to be accessible to the
 SMAPI servers.
 
 The length of namelist must no longer than 64.
+'''),
+    Opt('swap_force_mdisk',
+        section='zvm',
+        default=False,
+        help='''
+For swap disk to create from mdisk instead of vdisk.
+In boot from volume case, there might be no disk pool at all, then
+the only choice is to use vdisk (or using FCP LUN which is complicated),
+if customer doesn't want vdisk, then set this value to `True` so
+VDISK will not be used and in turn it will fail check.
 '''),
     Opt('remotehost_sshd_port',
         section='zvm',
@@ -267,6 +291,16 @@ The maximum allowed console log size, in kilobytes.
 Console logs might be transferred to sdk user, this option controls how
 large each file can be. A smaller size may mean more calls will be needed
 to transfer large consoles, which may not be desirable for performance reasons.
+    '''),
+    Opt('reachable_timeout',
+        section='guest',
+        default=180,
+        opt_type='int',
+        help='''
+The maximum time waiting until the guest reachable after started.
+
+When starting a guest, specify the timeout value will check the guest status
+untils it becames reachable or timeout.
     '''),
     Opt('softstop_timeout',
         section='guest',
@@ -612,6 +646,10 @@ class ConfigOpts(object):
                 if (k2 == "user_default_max_memory") and (
                     v2['default'] is not None):
                     self._check_user_default_max_memory(v2['default'])
+                # check user_default_max_reserved_memory
+                if (k2 == "user_default_max_reserved_memory") and (
+                    v2['default'] is not None):
+                    self._check_user_default_max_reserved_memory(v2['default'])
                 # check user_default_max_cpu
                 if (k2 == "user_default_max_cpu") and (
                     v2['default'] is not None):
@@ -629,6 +667,14 @@ class ConfigOpts(object):
         if (suffix not in ['G', 'M']) or (len(size) > 4) or (
             size.strip('0123456789') != ''):
             raise OptFormatError("zvm", "user_default_max_memory", value)
+
+    def _check_user_default_max_reserved_memory(self, value):
+        suffix = value[-1].upper()
+        size = value[:-1]
+        if (suffix not in ['G', 'M']) or (len(size) > 4) or (
+            size.strip('0123456789') != ''):
+            raise OptFormatError("zvm", "user_default_max_reserved_memory",
+                                  value)
 
     def _check_user_default_max_cpu(self, value):
         if (value < 1) or (value > 64):

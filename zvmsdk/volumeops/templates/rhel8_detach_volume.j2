@@ -49,7 +49,6 @@ echo "exit code for multipath -f: $exit_code"
 #    exit $exit_code
 #fi
 
-
 # flush IO for devices
 RealPath=`readlink -f /dev/disk/by-path/$SourceDevice`
 blockdev --flushbufs $RealPath > /dev/null
@@ -64,6 +63,7 @@ AutoScan=`cat /sys/module/zfcp/parameters/allow_lun_scan`
 if [[ "$AutoScan" != "Y" ]]; then
     for wwpn in $ActiveWWPNs
     do
+        chzdev -d zfcp-lun 0.0.$fcp:$wwpn:$lun
         echo "$lun" > /sys/bus/ccw/drivers/zfcp/0.0.$fcp/$wwpn/unit_remove
     done
 fi

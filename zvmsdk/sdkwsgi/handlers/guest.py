@@ -220,10 +220,13 @@ class VMHandler(object):
 
         couple = util.bool_from_string(info['couple'], strict=True)
 
+        # vlan_id is for couple operation only, uncouple ignore it
+        vlan_id = info.get('vlan_id', -1)
+
         if couple:
             info = self.client.send_request('guest_nic_couple_to_vswitch',
                                             userid, vdev, info['vswitch'],
-                                            active=active)
+                                            active=active, vlan_id=vlan_id)
         else:
             info = self.client.send_request('guest_nic_uncouple_from_vswitch',
                                             userid, vdev,
@@ -240,8 +243,10 @@ class VMAction(object):
         self.dd_semaphore = threading.BoundedSemaphore(
             value=CONF.wsgi.max_concurrent_deploy_capture)
 
+    @validation.schema(guest.start)
     def start(self, userid, body):
-        info = self.client.send_request('guest_start', userid)
+        timeout = body.get('timeout', 0)
+        info = self.client.send_request('guest_start', userid, timeout)
 
         return info
 

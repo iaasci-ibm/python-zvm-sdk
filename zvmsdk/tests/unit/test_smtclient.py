@@ -16,6 +16,7 @@
 import os
 import mock
 import tempfile
+import time
 import subprocess
 
 from smtLayer import smt
@@ -150,9 +151,271 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         max_mem = '4G'
         base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
         base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', 'ECKD:TESTPOOL')
         rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
               '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
               '--logonby "lbyuser1 lbyuser2" --ipl 0100')
+        self._smtclient.create_vm(user_id, cpu, memory, disk_list, profile,
+                                   max_cpu, max_mem, '', '', '', [], {})
+        request.assert_called_with(rd)
+        add_mdisks.assert_called_with(user_id, disk_list)
+        add_guest.assert_called_with(user_id)
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_swap_has_diskpool(self, add_guest, request, add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = [{'size': '1g',
+                      'is_boot_disk': True,
+                      'disk_pool': 'ECKD:eckdpool1',
+                      'format': 'ext3'},
+                     {'size': '1g',
+                      'format': 'swap'}]
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', 'ECKD:TESTPOOL')
+        rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
+              '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
+              '--logonby "lbyuser1 lbyuser2" --ipl 0100')
+        self._smtclient.create_vm(user_id, cpu, memory, disk_list,
+                                  profile, max_cpu, max_mem, '',
+                                  '', '', [], {})
+        request.assert_called_with(rd)
+        add_mdisks.assert_called_with(user_id, disk_list)
+        add_guest.assert_called_with(user_id)
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_multi_no_diskpool(self, add_guest, request, add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = [{'size': '1g',
+                      'is_boot_disk': True,
+                      'disk_pool': 'ECKD:eckdpool1',
+                      'format': 'ext3'},
+                     {'size': '1g',
+                      'disk_pool': 'ECKD:eckdpool1',
+                      'format': 'ext3'},
+                     {'size': '1g',
+                      'format': 'swap'}]
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', None)
+        rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
+              '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
+              '--logonby "lbyuser1 lbyuser2" --ipl 0100')
+        self._smtclient.create_vm(user_id, cpu, memory, disk_list, profile,
+                                  max_cpu, max_mem, '', '', '', [], {})
+        request.assert_called_with(rd)
+        add_mdisks.assert_called_with(user_id, disk_list)
+        add_guest.assert_called_with(user_id)
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_swap_no_diskpool_512M(self, add_guest, request,
+                                             add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = [{'size': '512M',
+                      'format': 'swap'}]
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', None)
+        rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
+              '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
+              '--logonby "lbyuser1 lbyuser2" --vdisk 0100:512M')
+        r = self._smtclient.create_vm(user_id, cpu, memory, disk_list, profile,
+                                      max_cpu, max_mem, '', '', '', [], {})
+        request.assert_called_with(rd)
+        add_mdisks.assert_not_called()
+        add_guest.assert_called_with(user_id)
+        expected = [{'size': '512M', 'format': 'swap', 'vdev': '0100'}]
+        self.assertEqual(expected, r)
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_swap_no_diskpool_1G(self, add_guest, request,
+                                           add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = [{'size': '1G',
+                      'format': 'swap'}]
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', None)
+        rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
+              '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
+              '--logonby "lbyuser1 lbyuser2" --vdisk 0100:1G')
+        r = self._smtclient.create_vm(user_id, cpu, memory, disk_list, profile,
+                                      max_cpu, max_mem, '', '', '', [], {})
+        request.assert_called_with(rd)
+        add_mdisks.assert_not_called()
+        add_guest.assert_called_with(user_id)
+
+        expected = [{'size': '1G', 'format': 'swap', 'vdev': '0100'}]
+        self.assertEqual(expected, r)
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_swap_no_diskpool_2048M(self, add_guest, request,
+                                             add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = [{'size': '2048M',
+                      'format': 'swap'}]
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', None)
+        rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
+              '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
+              '--logonby "lbyuser1 lbyuser2" --vdisk 0100:2048M')
+        r = self._smtclient.create_vm(user_id, cpu, memory, disk_list, profile,
+                                      max_cpu, max_mem, '', '', '', [], {})
+        request.assert_called_with(rd)
+        add_mdisks.assert_not_called()
+        add_guest.assert_called_with(user_id)
+        expected = [{'size': '2048M', 'format': 'swap', 'vdev': '0100'}]
+        self.assertEqual(expected, r)
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_swap_no_diskpool_2G(self, add_guest, request,
+                                             add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = [{'size': '2G',
+                      'format': 'swap'}]
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', None)
+        rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
+              '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
+              '--logonby "lbyuser1 lbyuser2" --vdisk 0100:2G')
+        r = self._smtclient.create_vm(user_id, cpu, memory, disk_list, profile,
+                                      max_cpu, max_mem, '', '', '', [], {})
+        request.assert_called_with(rd)
+        add_mdisks.assert_not_called()
+        add_guest.assert_called_with(user_id)
+        expected = [{'size': '2G', 'format': 'swap', 'vdev': '0100'}]
+        self.assertEqual(expected, r)
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_swap_no_diskpool_4G(self, add_guest, request,
+                                             add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = [{'size': '4G',
+                      'format': 'swap'}]
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', None)
+        self.assertRaises(exception.SDKInvalidInputFormat,
+                          self._smtclient.create_vm, user_id, cpu, memory,
+                          disk_list, profile, max_cpu, max_mem,
+                          '', '', '', [], {})
+        add_mdisks.assert_not_called()
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_swap_no_diskpool_4096M(self, add_guest, request,
+                                             add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = [{'size': '4096M',
+                      'format': 'swap'}]
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', None)
+        self.assertRaises(exception.SDKInvalidInputFormat,
+                          self._smtclient.create_vm, user_id, cpu, memory,
+                          disk_list, profile, max_cpu, max_mem,
+                          '', '', '', [], {})
+        add_mdisks.assert_not_called()
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_root_no_diskpool_no_disk(self, add_guest, request,
+                                                add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = []
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', None)
+        rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
+              '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
+              '--logonby "lbyuser1 lbyuser2"')
+        self._smtclient.create_vm(user_id, cpu, memory, disk_list, profile,
+                                   max_cpu, max_mem, '', '', '', [], {})
+        request.assert_called_with(rd)
+        add_mdisks.assert_not_called()
+        add_guest.assert_called_with(user_id)
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_root_no_diskpool(self, add_guest, request, add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = [{'size': '1g',
+                      'format': 'ext3'}]
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', None)
+        rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
+              '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
+              '--logonby "lbyuser1 lbyuser2"')
         self._smtclient.create_vm(user_id, cpu, memory, disk_list, profile,
                                    max_cpu, max_mem, '', '', '', [], {})
         request.assert_called_with(rd)
@@ -175,6 +438,7 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         max_mem = '4G'
         base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
         base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', 'ECKD:TESTPOOL')
         rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
               '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
               '--logonby "lbyuser1 lbyuser2" --ipl cms')
@@ -199,6 +463,7 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         max_mem = '4G'
         base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
         base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', 'ECKD:TESTPOOL')
         ipl_from = '5c71'
         dedicate_vdevs = ['5c71', '5d71']
         loaddev = {'portname': '5005076802400c1b',
@@ -213,6 +478,37 @@ class SDKSMTClientTestCases(base.SDKTestCase):
                                    dedicate_vdevs, loaddev)
         request.assert_called_with(rd)
         add_mdisks.assert_called_with(user_id, disk_list)
+        add_guest.assert_called_with(user_id)
+
+    @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(database.GuestDbOperator, 'add_guest')
+    def test_create_vm_boot_from_volume_only(self, add_guest, request,
+                                             add_mdisks):
+        user_id = 'fakeuser'
+        cpu = 2
+        memory = 1024
+        disk_list = []
+        profile = 'osdflt'
+        max_cpu = 10
+        max_mem = '4G'
+        base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
+        base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', 'ECKD:TESTPOOL')
+        ipl_from = '5c71'
+        dedicate_vdevs = ['5c71', '5d71']
+        loaddev = {'portname': '5005076802400c1b',
+                   'lun': '0000000000000000'}
+        rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
+              '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
+              '--logonby "lbyuser1 lbyuser2" --ipl 5c71 '
+              '--dedicate "5c71 5d71" --loadportname 5005076802400c1b '
+              '--loadlun 0000000000000000')
+        self._smtclient.create_vm(user_id, cpu, memory, disk_list, profile,
+                                   max_cpu, max_mem, ipl_from, '', '',
+                                   dedicate_vdevs, loaddev)
+        request.assert_called_with(rd)
+        add_mdisks.assert_not_called()
         add_guest.assert_called_with(user_id)
 
     @mock.patch.object(smtclient.SMTClient, 'add_mdisks')
@@ -233,6 +529,7 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         ipl_loadparam = 'load=1'
         base.set_conf('zvm', 'default_admin_userid', 'lbyuser1 lbyuser2')
         base.set_conf('zvm', 'user_root_vdev', '0100')
+        base.set_conf('zvm', 'disk_pool', 'ECKD:TESTPOOL')
         rd = ('makevm fakeuser directory LBYONLY 1024m G --cpus 2 '
               '--profile osdflt --maxCPU 10 --maxMemSize 4G --setReservedMem '
               '--logonby "lbyuser1 lbyuser2" --ipl cms --iplParam dummy '
@@ -256,6 +553,14 @@ class SDKSMTClientTestCases(base.SDKTestCase):
 
         self._smtclient._add_mdisk(userid, disk, vdev),
         request.assert_called_once_with(rd)
+
+    def test_add_mdisk_no_disk_pool(self):
+        vdev = '0101'
+        disk = {'size': '1g',
+                'format': 'ext3'}
+        base.set_conf('zvm', 'disk_pool', None)
+        self.assertRaises(exception.SDKGuestOperationError,
+                          self._smtclient._add_mdisk, 'fakeuser', disk, vdev)
 
     @mock.patch.object(smtclient.SMTClient, '_request')
     def test_add_mdisk_format_none(self, request):
@@ -1228,7 +1533,7 @@ class SDKSMTClientTestCases(base.SDKTestCase):
                                '--fcpchannel=5d71',
                                '--wwpn=5005076802100c1b,5005076802200c1b',
                                '--lun=0000000000000000']
-        execute.assert_called_once_with(refresh_bootmap_cmd)
+        execute.assert_called_once_with(refresh_bootmap_cmd, timeout=600)
 
     @mock.patch.object(zvmutils, 'execute')
     def test_refresh_bootmap_return_value_withskip(self, execute):
@@ -1244,7 +1549,7 @@ class SDKSMTClientTestCases(base.SDKTestCase):
                                '--wwpn=5005076802100c1b,5005076802200c1b',
                                '--lun=0000000000000000',
                                '--skipzipl=YES']
-        execute.assert_called_once_with(refresh_bootmap_cmd)
+        execute.assert_called_once_with(refresh_bootmap_cmd, timeout=600)
 
     @mock.patch.object(zvmutils, 'get_smt_userid')
     @mock.patch.object(smtclient.SMTClient, '_request')
@@ -1393,8 +1698,40 @@ class SDKSMTClientTestCases(base.SDKTestCase):
             "--operands",
             "-k image_device_number=fake_vdev",
             "-k adapter_type=QDIO"))
+
+        # make sure only those 2 APIs called, no retry triggered
+        self.assertEqual(2, request.call_count)
         request.assert_any_call(rd1)
         request.assert_any_call(rd2)
+
+    @mock.patch.object(time, "sleep")
+    @mock.patch.object(smtclient.SMTClient, '_create_nic_inactive_exception')
+    @mock.patch.object(database.NetworkDbOperator, 'switch_add_record')
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(smtclient.SMTClient, 'get_power_state')
+    def test_private_create_nic_active_retry(self, power_state, request,
+                                             add_record, cnie, ts):
+        results = {'rc': 400, 'rs': 12, 'logEntries': ''}
+        request.side_effect = exception.SDKSMTRequestFailed(results,
+                                                               "fake error")
+        power_state.return_value = 'on'
+        self._smtclient._create_nic("fakenode", "fake_vdev",
+                                     nic_id="fake_nic",
+                                     mac_addr='11:22:33:44:55:66',
+                                     active=False)
+        add_record.assert_called_once_with("fakenode", "fake_vdev",
+                                            port="fake_nic")
+        cnie.assert_called_once_with(mock.ANY, 'fakenode', 'fake_vdev')
+        rd1 = ' '.join((
+            'SMAPI fakenode API Virtual_Network_Adapter_Create_Extended_DM',
+            "--operands",
+            "-k image_device_number=fake_vdev",
+            "-k adapter_type=QDIO",
+            "-k mac_id=445566"))
+
+        request.assert_any_call(rd1)
+        self.assertEqual(5, request.call_count)
+        self.assertEqual(4, ts.call_count)
 
     @mock.patch.object(smtclient.SMTClient, '_request')
     def test_get_user_direct(self, req):
@@ -1441,16 +1778,69 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         self._smtclient.delete_nic(userid, vdev, True)
         undedicate_nic.assert_called_with(userid, vdev, active=True)
 
+    @mock.patch.object(smtclient.SMTClient, 'get_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_lock_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_replace_user_direct')
     @mock.patch.object(smtclient.SMTClient, '_couple_nic')
-    def test_couple_nic_to_vswitch(self, couple_nic):
+    def test_couple_nic_to_vswitch_no_vlan(self, couple_nic, replace,
+                                   lock, get_user):
+        replace_data = ["USER ABC", "NICDEF 1000 DEVICE 3",
+                        "NICDEF 1000 LAN SYSTEM VS1"]
+        get_user.return_value = ["USER ABC", "NICDEF 1000 DEVICE 3"]
         self._smtclient.couple_nic_to_vswitch("fake_userid",
-                                               "fakevdev",
-                                               "fake_VS_name",
-                                               True)
+                                               "1000",
+                                               "VS1",
+                                               active=True)
+        lock.assert_called_with("fake_userid")
+        replace.assert_called_with("fake_userid", replace_data)
         couple_nic.assert_called_with("fake_userid",
-                                      "fakevdev",
-                                      "fake_VS_name",
+                                      "1000",
+                                      "VS1",
                                       active=True)
+
+    @mock.patch.object(smtclient.SMTClient, 'get_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_lock_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_replace_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_couple_nic')
+    def test_couple_nic_to_vswitch_vlan(self, couple_nic, replace,
+                                   lock, get_user):
+        replace_data = ["USER ABC", "NICDEF 1000 DEVICE 3",
+                        "NICDEF 1000 LAN SYSTEM VS1 VLAN 55"]
+        get_user.return_value = ["USER ABC", "NICDEF 1000 DEVICE 3"]
+        self._smtclient.couple_nic_to_vswitch("fake_userid",
+                                               "1000",
+                                               "VS1",
+                                               active=True,
+                                               vlan_id=55)
+        lock.assert_called_with("fake_userid")
+        replace.assert_called_with("fake_userid", replace_data)
+        couple_nic.assert_called_with("fake_userid",
+                                      "1000",
+                                      "VS1",
+                                      active=True)
+
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(smtclient.SMTClient, 'get_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_lock_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_replace_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_couple_nic')
+    def test_couple_nic_to_vswitch_vlan_fail(self, couple_nic, replace,
+                                   lock, get_user, request):
+        replace_data = ["USER ABC", "NICDEF 1000 DEVICE 3",
+                        "NICDEF 1000 LAN SYSTEM VS1 VLAN 55"]
+        results = {'rs': 0, 'errno': 0, 'strError': '',
+                   'overallRC': 1, 'logEntries': [], 'rc': 0,
+                   'response': ['fake response']}
+        get_user.return_value = ["USER ABC", "NICDEF 1000 DEVICE 3"]
+        replace.side_effect = exception.SDKSMTRequestFailed(results,
+                                                            "fake error")
+        request.return_value = {'overallRC': 0}
+        self.assertRaises(exception.SDKGuestOperationError,
+            self._smtclient.couple_nic_to_vswitch,
+            "fake_userid", "1000", "VS1", active=True, vlan_id=55)
+        lock.assert_called_with("fake_userid")
+        replace.assert_called_with("fake_userid", replace_data)
+        request.assert_called_with("SMAPI fake_userid API Image_Unlock_DM ")
 
     @mock.patch.object(smtclient.SMTClient, '_uncouple_nic')
     def test_uncouple_nic_from_vswitch(self, uncouple_nic):
@@ -1471,13 +1861,6 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         vdev = 'FakeVdev'
         vswitch_name = 'FakeVS'
 
-        requestData1 = ' '.join((
-            'SMAPI FakeID',
-            "API Virtual_Network_Adapter_Connect_Vswitch_DM",
-            "--operands",
-            "-v FakeVdev",
-            "-n FakeVS"))
-
         requestData2 = ' '.join((
             'SMAPI FakeID',
             "API Virtual_Network_Adapter_Connect_Vswitch",
@@ -1488,7 +1871,6 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         self._smtclient._couple_nic(userid, vdev, vswitch_name,
                                      active=True)
         update_switch.assert_called_with(userid, vdev, vswitch_name)
-        request.assert_any_call(requestData1)
         request.assert_any_call(requestData2)
 
     @mock.patch.object(database.NetworkDbOperator,
@@ -1577,6 +1959,15 @@ class SDKSMTClientTestCases(base.SDKTestCase):
     def test_delete_userid_too_slow(self, request):
         rd = 'deletevm fuser1 directory'
         results = {'rc': 596, 'rs': 6831, 'logEntries': ''}
+        request.side_effect = exception.SDKSMTRequestFailed(results,
+                                                               "fake error")
+        self._smtclient.delete_userid('fuser1')
+        request.assert_called_once_with(rd)
+
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    def test_delete_userid_with_vdisk_warning(self, request):
+        rd = 'deletevm fuser1 directory'
+        results = {'rc': 596, 'rs': 3543, 'logEntries': ''}
         request.side_effect = exception.SDKSMTRequestFailed(results,
                                                                "fake error")
         self._smtclient.delete_userid('fuser1')
@@ -1864,6 +2255,15 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         self._smtclient.add_mdisks(userid, disk_list)
         add_mdisk.assert_any_call(userid, disk_list[0], '0100')
         add_mdisk.assert_any_call(userid, disk_list[1], '0101')
+
+    def test_add_mdisks_no_disk_pool(self):
+        disk_list = [{'size': '1g',
+                      'is_boot_disk': True,
+                      'disk_pool': 'ECKD:eckdpool1'},
+                     {'size': '200000',
+                      'format': 'ext3'}]
+        self.assertRaises(exception.SDKGuestOperationError,
+                          self._smtclient.add_mdisks, 'fakeuser', disk_list)
 
     @mock.patch.object(smtclient.SMTClient, '_add_mdisk')
     def test_add_mdisks_with_1dev(self, add_mdisk):
@@ -2788,6 +3188,76 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         request.assert_not_called()
 
     @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(smtclient.SMTClient, 'execute_cmd')
+    @mock.patch.object(smtclient.SMTClient, '_get_available_cpu_addrs')
+    @mock.patch.object(smtclient.SMTClient, 'resize_cpus')
+    @mock.patch.object(smtclient.SMTClient, '_get_active_cpu_addrs')
+    def test_live_resize_cpus_redhat(self, get_active, resize, get_avail,
+                              exec_cmd, request):
+        userid = 'testuid'
+        count = 4
+        get_active.return_value = ['00', '01']
+        resize.return_value = (1, ['02', '03'], 32)
+        avail_lst = ['02', '03', '04', '05', '06', '07', '08', '09',
+                     '0A', '0B', '0C', '0D', '0E', '0F', '10', '11',
+                     '12', '13', '14', '15', '16', '17', '18', '19',
+                     '1A', '1B', '1C', '1D', '1E', '1F']
+        get_avail.return_value = avail_lst
+        exec_cmd.side_effect = [[''],
+                                [''],
+                                ['Linux rhel82-ext4-eckd 4.18.0-193.el8.'
+                                 's390x #1 SMP Fri Mar 27 14:43:09 UTC'
+                                 ' 2020 s390x s390x s390x GNU/Linux ']]
+        self._smtclient.live_resize_cpus(userid, count)
+        get_active.assert_called_once_with(userid)
+        resize.assert_called_once_with(userid, count)
+        get_avail.assert_called_once_with(['00', '01'], 32)
+        cmd_def_cpu = "vmcp def cpu 02 03"
+        cmd_rescan_cpu = "chcpu -r"
+        cmd_uname = "uname -a"
+        exec_cmd.assert_has_calls([mock.call(userid, cmd_def_cpu),
+                                   mock.call(userid, cmd_rescan_cpu),
+                                   mock.call(userid, cmd_uname)])
+        request.assert_not_called()
+
+    @mock.patch.object(smtclient.SMTClient, '_request')
+    @mock.patch.object(smtclient.SMTClient, 'execute_cmd')
+    @mock.patch.object(smtclient.SMTClient, '_get_available_cpu_addrs')
+    @mock.patch.object(smtclient.SMTClient, 'resize_cpus')
+    @mock.patch.object(smtclient.SMTClient, '_get_active_cpu_addrs')
+    def test_live_resize_cpus_ubuntu(self, get_active, resize, get_avail,
+                              exec_cmd, request):
+        userid = 'testuid'
+        count = 4
+        get_active.return_value = ['00', '01']
+        resize.return_value = (1, ['02', '03'], 32)
+        avail_lst = ['02', '03', '04', '05', '06', '07', '08', '09',
+                     '0A', '0B', '0C', '0D', '0E', '0F', '10', '11',
+                     '12', '13', '14', '15', '16', '17', '18', '19',
+                     '1A', '1B', '1C', '1D', '1E', '1F']
+        get_avail.return_value = avail_lst
+        exec_cmd.side_effect = [[''],
+                                  [''],
+                                  ['Linux ubuntu20-ext4-eckd 5.4.0-37-generic'
+                                   ' #41-Ubuntu SMP Wed Jun 3 17:53:50 UTC '
+                                   '2020 s390x s390x s390x GNU/Linux'],
+                                  ['']]
+        self._smtclient.live_resize_cpus(userid, count)
+        get_active.assert_called_once_with(userid)
+        resize.assert_called_once_with(userid, count)
+        get_avail.assert_called_once_with(['00', '01'], 32)
+
+        cmd_def_cpu = "vmcp def cpu 02 03"
+        cmd_rescan_cpu = "chcpu -r"
+        cmd_uname = "uname -a"
+        cmd_chcpu = "chcpu -e 02,03"
+        exec_cmd.assert_has_calls([mock.call(userid, cmd_def_cpu),
+                                   mock.call(userid, cmd_rescan_cpu),
+                                   mock.call(userid, cmd_uname),
+                                   mock.call(userid, cmd_chcpu)])
+        request.assert_not_called()
+
+    @mock.patch.object(smtclient.SMTClient, '_request')
     @mock.patch.object(smtclient.SMTClient, '_get_available_cpu_addrs')
     @mock.patch.object(smtclient.SMTClient, '_get_defined_cpu_addrs')
     def test_resize_cpus_equal_count(self, get_defined,
@@ -3014,6 +3484,96 @@ class SDKSMTClientTestCases(base.SDKTestCase):
     @mock.patch.object(smtclient.SMTClient, '_get_defined_memory')
     @mock.patch.object(smtclient.SMTClient, '_lock_user_direct')
     @mock.patch.object(smtclient.SMTClient, '_replace_user_direct')
+    def test_resize_memory_conf_max_stor_reserved_in_G(self,
+                                            replace_def,
+                                            lock_def, get_def):
+        userid = 'testuid'
+        size = '32768M'
+        base.set_conf('zvm', 'user_default_max_reserved_memory', '64G')
+        sample_definition = [u'USER TESTUID LBYONLY 65536M 128G G',
+                             u'INCLUDE OSDFLT',
+                             u'COMMAND DEF STOR RESERVED 65536M',
+                             u'CPU 00 BASE',
+                             u'IPL 0100',
+                             u'MDISK 0100 3390 5501 5500 OMB1BA MR',
+                             u'']
+        get_def.return_value = (1024, 131072, 65536, sample_definition)
+        (action, defined_mem, max_mem, user_direct) = \
+            self._smtclient.resize_memory(userid, size)
+        self.assertEqual(action, 1)
+        get_def.assert_called_once_with(userid)
+        lock_def.assert_called_once_with(userid)
+        new_entry = ("USER TESTUID LBYONLY 32768M 128G G\n"
+                     "INCLUDE OSDFLT\n"
+                     "COMMAND DEF STOR RESERVED 65536M\n"
+                     "CPU 00 BASE\n"
+                     "IPL 0100\n"
+                     "MDISK 0100 3390 5501 5500 OMB1BA MR\n")
+        replace_def.assert_called_once_with(userid, new_entry)
+
+    @mock.patch.object(smtclient.SMTClient, '_get_defined_memory')
+    @mock.patch.object(smtclient.SMTClient, '_lock_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_replace_user_direct')
+    def test_resize_memory_conf_max_stor_reserved_in_M(self,
+                                            replace_def,
+                                            lock_def, get_def):
+        userid = 'testuid'
+        size = '32768M'
+        base.set_conf('zvm', 'user_default_max_reserved_memory', '65536M')
+        sample_definition = [u'USER TESTUID LBYONLY 65536M 128G G',
+                             u'INCLUDE OSDFLT',
+                             u'COMMAND DEF STOR RESERVED 65536M',
+                             u'CPU 00 BASE',
+                             u'IPL 0100',
+                             u'MDISK 0100 3390 5501 5500 OMB1BA MR',
+                             u'']
+        get_def.return_value = (1024, 131072, 65536, sample_definition)
+        (action, defined_mem, max_mem, user_direct) = \
+            self._smtclient.resize_memory(userid, size)
+        self.assertEqual(action, 1)
+        get_def.assert_called_once_with(userid)
+        lock_def.assert_called_once_with(userid)
+        new_entry = ("USER TESTUID LBYONLY 32768M 128G G\n"
+                     "INCLUDE OSDFLT\n"
+                     "COMMAND DEF STOR RESERVED 65536M\n"
+                     "CPU 00 BASE\n"
+                     "IPL 0100\n"
+                     "MDISK 0100 3390 5501 5500 OMB1BA MR\n")
+        replace_def.assert_called_once_with(userid, new_entry)
+
+    @mock.patch.object(smtclient.SMTClient, '_get_defined_memory')
+    @mock.patch.object(smtclient.SMTClient, '_lock_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_replace_user_direct')
+    def test_resize_memory_default_max_stor_reserved(self,
+                                            replace_def,
+                                            lock_def, get_def):
+        userid = 'testuid'
+        size = '4096M'
+        base.set_conf('zvm', 'user_default_max_reserved_memory', '128G')
+        sample_definition = [u'USER TESTUID LBYONLY 1024M 256G G',
+                             u'INCLUDE OSDFLT',
+                             u'COMMAND DEF STOR RESERVED 131072M',
+                             u'CPU 00 BASE',
+                             u'IPL 0100',
+                             u'MDISK 0100 3390 5501 5500 OMB1BA MR',
+                             u'']
+        get_def.return_value = (1024, 262144, 131072, sample_definition)
+        (action, defined_mem, max_mem, user_direct) = \
+            self._smtclient.resize_memory(userid, size)
+        self.assertEqual(action, 1)
+        get_def.assert_called_once_with(userid)
+        lock_def.assert_called_once_with(userid)
+        new_entry = ("USER TESTUID LBYONLY 4096M 256G G\n"
+                     "INCLUDE OSDFLT\n"
+                     "COMMAND DEF STOR RESERVED 131072M\n"
+                     "CPU 00 BASE\n"
+                     "IPL 0100\n"
+                     "MDISK 0100 3390 5501 5500 OMB1BA MR\n")
+        replace_def.assert_called_once_with(userid, new_entry)
+
+    @mock.patch.object(smtclient.SMTClient, '_get_defined_memory')
+    @mock.patch.object(smtclient.SMTClient, '_lock_user_direct')
+    @mock.patch.object(smtclient.SMTClient, '_replace_user_direct')
     def test_resize_memory_lock_failed(self, replace_def, lock_def, get_def):
         userid = 'testuid'
         size = '2g'
@@ -3136,6 +3696,31 @@ class SDKSMTClientTestCases(base.SDKTestCase):
         execute_cmd.return_value = sample_lsmem
         active_mem = self._smtclient._get_active_memory(userid)
         self.assertEqual(active_mem, 4096)
+
+    @mock.patch.object(smtclient.SMTClient, 'execute_cmd')
+    def test_get_active_memory_different_lsmem_output(self, execute_cmd):
+        userid = 'testuid'
+        sample_lsmem = [u'RANGE                           SIZE   \
+                        STATE REMOVABLE  BLOCK',
+                        u'0x0000000000000000-0x000000000fffffff  256M  \
+                        online        no      0',
+                        u'0x0000000010000000-0x000000004fffffff    1G  \
+                        online       yes    1-4',
+                        u'0x0000000050000000-0x000000008fffffff    1G  \
+                        online        no    5-8',
+                        u'0x0000000090000000-0x00000000cfffffff    1G  \
+                        online       yes   9-12'
+                        u'0x00000000d0000000-0x00000000ffffffff  768M  \
+                        online        no  13-15'
+                        u'0x0000000100000000-0x0000000fffffffff   60G \
+                        offline         - 16-255'
+                        u'Memory block size:       256M',
+                        u'Total online memory:      32G',
+                        u'Total offline memory:     32G'
+                        ]
+        execute_cmd.return_value = sample_lsmem
+        active_mem = self._smtclient._get_active_memory(userid)
+        self.assertEqual(active_mem, 32768)
 
     @mock.patch.object(smtclient.SMTClient, '_get_active_memory')
     @mock.patch.object(smtclient.SMTClient, 'resize_memory')
@@ -3268,6 +3853,28 @@ class SDKSMTClientTestCases(base.SDKTestCase):
                                    mock.call(userid, online_mem_cmd),
                                    mock.call(userid, revert_standby_cmd)])
         revert.assert_called_once_with(userid, sample_direct)
+
+    @mock.patch.object(smtclient.SMTClient, '_get_active_memory')
+    @mock.patch.object(smtclient.SMTClient, 'resize_memory')
+    @mock.patch.object(smtclient.SMTClient, 'execute_cmd')
+    def test_live_resize_memory_exceed_max_stor_reserved(self, exec_cmd,
+                                                         resize_mem,
+                                                         get_active_mem):
+        userid = 'testuid'
+        req_mem = "252g"
+        get_active_mem.return_value = 2048
+        sample_direct = [u'USER TESTUID LBYONLY 258048M 256G G',
+                         u'INCLUDE OSDFLT',
+                         u'COMMAND DEF STOR RESERVED 4096M',
+                         u'CPU 00 BASE',
+                         u'IPL 0100',
+                         u'MDISK 0100 3390 5501 5500 OMB1BA MR',
+                         u'']
+        resize_mem.return_value = (1, 258048, 262144, sample_direct)
+        self.assertRaises(exception.SDKConflictError,
+                          self._smtclient.live_resize_memory, userid,
+                          req_mem)
+        resize_mem.assert_not_called()
 
     def test_guest_deploy_rhcos_no_ignition(self):
         userid = 'testuid'

@@ -18,6 +18,8 @@
 300;10;300;12;Failed to deploy image to userid: '%(userid)s', get unpackdiskimage cmd failed: %(err)s
 300;10;300;13;Failed to deploy image to userid: '%(userid)s', ignition file is required when deploying RHCOS image
 300;10;300;14;Failed to deploy image to userid: '%(userid)s', %(msg)s
+300;10;300;15;Failed to live resize cpus of guest: '%(userid)s', error: enable new defined cpus failed: '%(err)s'.
+300;10;300;16;Failed to start the guest: '%(userid)s', %(msg)s
 **Operation on Network failed**
 300;20;300;1;Database operation failed, error: %(msg)s
 300;20;300;2;ZVMSDK network error: %(msg)s
@@ -29,6 +31,7 @@
 300;30;300;3;Volume %(vol)s has already been attached on instance %(inst)s
 300;30;300;4;Volume %(vol)s is not attached on instance %(inst)s
 300;30;300;5;Refresh bootmap fails, error code: %(errcode)s and reason: %(errmsg)s
+300;30;300;6;IUCV failed to get authorization from instance %(userid)s with reason %(msg)s
 **Operation on Image failed**
 300;40;300;1;Database operation failed, error: %(msg)s
 300;40;300;2;No image schema found for %(schema)s
@@ -75,6 +78,7 @@
 409;None;409;18;Failed to live resize memory of guest: '%(userid)s', error: current active memory size: '%(active)i'm is greater than requested size: '%(req)i'm.
 409;None;409;19;Failed to resize memory of guest: '%(userid)s', error: user definition is not in expected format, cann't get the defined/max/reserved storage.
 409;None;409;20;Failed to resize memory of guest: '%(userid)s', error: the requested memory size: '%(req)im' exceeds the maximum memory size defined: '%(max)im'.
+409;None;409;21;Failed to live resize memory of guest: %(userid)s, error: the memory size to be increased: '%(inc)im' is greater than the maximum reserved memory size: '%(max)im'.
 **The operated object is deleted**
 410;None;410;;The operated object is deleted
 **ZVM SDK Internal Error**
@@ -114,8 +118,9 @@
 4;1;4;202;ULTGUT0202E NUM_BLOCKS is not an integer size of blocks.
 4;1;4;203;ULTGUT0203E Failed to convert DISK_SIZE to a number of cylinders.
 4;1;4;204;ULTGUT0204E DISK_SIZE is not an integer size of cylinders.
-4;1;4;205;ULTMVM0204E memory size did not end with suffix 'G' or 'M'.
-4;1;4;206;ULTMVM0204E Max memory size MAX_MEM_SIZE specified is less than initial memory size INIT_MEM_SIZE.
+4;1;4;205;ULTMVM0205E memory size did not end with suffix 'G' or 'M'.
+4;1;4;206;ULTMVM0206E Max memory size MAX_MEM_SIZE specified is less than initial memory size INIT_MEM_SIZE.
+4;1;4;207;ULTMVM0207E VDISK Size (swap disk) is greater than 2G.
 4;1;4;400;ULTGUT0400E The worker script SCRIPT_NAME does not exist.
 4;1;7;401;ULTGUT0401E Failed to punch FILE_LOCATION file to guest: USERID, out: OUTPUT
 4;1;5;402;ULTGUT0402E No information was found for the specified pool(s): DISK_POOL

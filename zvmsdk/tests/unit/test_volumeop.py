@@ -35,7 +35,7 @@ class TestVolumeConfiguratorAPI(base.SDKTestCase):
     @mock.patch.object(dist.rhel7, "create_active_net_interf_cmd")
     @mock.patch("zvmsdk.volumeop.VolumeConfiguratorAPI."
                 "configure_volume_attach")
-    @mock.patch("zvmsdk.vmops.VMOps.is_reachable")
+    @mock.patch("zvmsdk.volumeop.VolumeConfiguratorAPI.check_IUCV_is_ready")
     def test_config_attach_reachable(self, is_reachable, config_attach,
                                      restart_zvmguestconfigure, execute_cmd,
                                      get_dist):
@@ -65,7 +65,7 @@ class TestVolumeConfiguratorAPI(base.SDKTestCase):
     @mock.patch("zvmsdk.dist.LinuxDistManager.get_linux_dist")
     @mock.patch("zvmsdk.volumeop.VolumeConfiguratorAPI."
                 "configure_volume_attach")
-    @mock.patch("zvmsdk.vmops.VMOps.is_reachable")
+    @mock.patch("zvmsdk.volumeop.VolumeConfiguratorAPI.check_IUCV_is_ready")
     def test_config_attach_not_reachable(self, is_reachable, config_attach,
                                          get_dist):
         fcp = 'bfc3'
@@ -85,6 +85,43 @@ class TestVolumeConfiguratorAPI(base.SDKTestCase):
                                         target_lun, multipath, os_version,
                                         mount_point, new, need_restart)
         get_dist.assert_called_once_with(os_version)
+
+    @mock.patch("zvmsdk.smtclient.SMTClient.execute_cmd")
+    def test_check_IUCV_is_ready(self, execute_cmd):
+        assigner_id = 'fakeid'
+        execute_cmd.return_value = ''
+
+        ret = self.configurator.check_IUCV_is_ready(assigner_id)
+        execute_cmd.assert_called_once_with(assigner_id, 'pwd')
+        self.assertEqual(ret, True)
+
+    @mock.patch("zvmsdk.smtclient.SMTClient.execute_cmd")
+    def test_check_IUCV_is_ready_not_ready(self, execute_cmd):
+        # case: not ready, but can continue
+        assigner_id = 'fakeid'
+        results = {'rs': 0, 'errno': 0, 'strError': '',
+                   'overallRC': 1, 'logEntries': [], 'rc': 0,
+                   'response': ['fake response']}
+        execute_cmd.side_effect = exception.SDKSMTRequestFailed(
+            results, 'fake error contains other things')
+
+        ret = self.configurator.check_IUCV_is_ready(assigner_id)
+        execute_cmd.assert_called_once_with(assigner_id, 'pwd')
+        self.assertEqual(ret, False)
+
+    @mock.patch("zvmsdk.smtclient.SMTClient.execute_cmd")
+    def test_check_IUCV_is_ready_raise_excetion(self, execute_cmd):
+        # case: not ready, must raise exception
+        assigner_id = 'fakeid'
+        results = {'rs': 0, 'errno': 0, 'strError': '',
+                   'overallRC': 1, 'logEntries': [], 'rc': 0,
+                   'response': ['fake response']}
+        execute_cmd.side_effect = exception.SDKSMTRequestFailed(
+            results, 'fake error contains UNAUTHORIZED_ERROR')
+
+        self.assertRaises(exception.SDKVolumeOperationError,
+                          self.configurator.check_IUCV_is_ready,
+                          assigner_id)
 
     def test_config_force_attach(self):
         pass
@@ -164,18 +201,20 @@ class TestFCP(base.SDKTestCase):
                 'opnstk1:   Physical world wide port number: 20076D8500005181']
         fcp = volumeop.FCP(info)
         self.assertEqual('B83D', fcp._dev_no.upper())
+        self.assertEqual('free', fcp._dev_status)
         self.assertIsNone(fcp._npiv_port)
         self.assertEqual('59', fcp._chpid.upper())
         self.assertEqual('20076D8500005181', fcp._physical_port.upper())
 
     def test_parse_npiv(self):
         info = ['opnstk1: FCP device number: B83D',
-                'opnstk1:   Status: Free',
+                'opnstk1:   Status: Active',
                 'opnstk1:   NPIV world wide port number: 20076D8500005182',
                 'opnstk1:   Channel path ID: 59',
                 'opnstk1:   Physical world wide port number: 20076D8500005181']
         fcp = volumeop.FCP(info)
         self.assertEqual('B83D', fcp._dev_no.upper())
+        self.assertEqual('active', fcp._dev_status)
         self.assertEqual('20076D8500005182', fcp._npiv_port.upper())
         self.assertEqual('59', fcp._chpid.upper())
         self.assertEqual('20076D8500005181', fcp._physical_port.upper())
@@ -287,6 +326,36 @@ class TestFCPManager(base.SDKTestCase):
         self.assertEqual('20076D8500005185', physical)
         self.assertEqual('50', self.fcpops._fcp_pool['b83e']._chpid.upper())
 
+    @mock.patch("zvmsdk.database.FCPDbOperator.new")
+    def test_add_fcp_free(self, db_new):
+        # case1, status is free
+        info = ['opnstk1: FCP device number: 1234',
+                'opnstk1:   Status: Free',
+                'opnstk1:   NPIV world wide port number: 20076D8500005182',
+                'opnstk1:   Channel path ID: 59',
+                'opnstk1:   Physical world wide port number: 20076D8500005181']
+        try:
+            self.fcpops._fcp_pool['1234'] = volumeop.FCP(info)
+            self.fcpops._add_fcp('1234', 0)
+            db_new.assert_called_once_with('1234', 0)
+        finally:
+            self.db_op.delete('1234')
+            self.fcpops._fcp_pool.pop('1234')
+
+    @mock.patch("zvmsdk.database.FCPDbOperator.new")
+    def test_add_fcp_active(self, db_new):
+        info = ['opnstk1: FCP device number: 1234',
+                'opnstk1:   Status: Active',
+                'opnstk1:   NPIV world wide port number: 20076D8500005182',
+                'opnstk1:   Channel path ID: 59',
+                'opnstk1:   Physical world wide port number: 20076D8500005181']
+        try:
+            self.fcpops._fcp_pool['1234'] = volumeop.FCP(info)
+            self.fcpops._add_fcp('1234', 1)
+            self.assertFalse(db_new.called)
+        finally:
+            self.fcpops._fcp_pool.pop('1234')
+
     @mock.patch("zvmsdk.volumeop.FCPManager._get_all_fcp_info")
     @mock.patch("zvmsdk.volumeop.FCPManager._report_orphan_fcp")
     @mock.patch("zvmsdk.volumeop.FCPManager._add_fcp")
@@ -360,6 +429,13 @@ class TestFCPManager(base.SDKTestCase):
             self.db_op.delete('c83d')
             self.db_op.delete('c83e')
             self.db_op.delete('c83f')
+
+    @mock.patch("zvmsdk.volumeop.FCPManager._list_fcp_details")
+    def test_get_all_fcp_info(self, list_details):
+        list_details.return_value = []
+        self.fcpops._get_all_fcp_info('dummy1')
+        list_details.assert_has_calls([mock.call('dummy1', 'free'),
+                                       mock.call('dummy1', 'active')])
 
     def test_add_fcp_for_assigner(self):
         # create 2 FCP
@@ -483,17 +559,49 @@ class TestFCPManager(base.SDKTestCase):
         fcp = self.fcpops.find_and_reserve_fcp('user1')
         self.assertIsNone(fcp)
 
-    def test_get_available_fcp(self):
-        self.db_op.new('c83c', 0)
-        self.db_op.new('c83d', 1)
+    @mock.patch("zvmsdk.database.FCPDbOperator.get_from_assigner")
+    def test_get_available_fcp_reserve_false(self, get_from_assigner):
+        """test reserve == False.
+        no matter what connections is, the output will be same."""
+        base.set_conf('volume', 'get_fcp_pair_with_same_index', 0)
+        # case1: get_from_assigner return []
+        get_from_assigner.return_value = []
+        result = self.fcpops.get_available_fcp('user1', False)
+        self.assertEqual([], result)
+        # case2: get_from_assigner return ['1234', '5678']
+        get_from_assigner.return_value = [('1234', '', 0, 0, 0, ''),
+                                          ('5678', '', 0, 0, 0, '')]
+        result = self.fcpops.get_available_fcp('user1', False)
+        expected = ['1234', '5678']
+        self.assertEqual(expected, result)
 
-        try:
-            result = self.fcpops.get_available_fcp('user1')
-            expected = ['c83c', 'c83d']
-            self.assertEqual(expected, result)
-        finally:
-            self.db_op.delete('c83c')
-            self.db_op.delete('c83d')
+    @mock.patch("zvmsdk.database.FCPDbOperator.get_path_count")
+    @mock.patch("zvmsdk.database.FCPDbOperator.assign")
+    @mock.patch("zvmsdk.database.FCPDbOperator.get_fcp_pair")
+    @mock.patch("zvmsdk.database.FCPDbOperator."
+                "get_allocated_fcps_from_assigner")
+    def test_get_available_fcp_reserve_true(self, get_allocated,
+                                            get_fcp_pair, assign,
+                                            get_path_count):
+        """test reserve == True"""
+        base.set_conf('volume', 'get_fcp_pair_with_same_index', 0)
+        # case1: get_allocated return []
+        get_allocated.return_value = []
+        get_fcp_pair.return_value = ['1234', '5678']
+        expected = ['1234', '5678']
+        result = self.fcpops.get_available_fcp('user1', True)
+        assign.assert_has_calls([mock.call('1234', 'user1',
+                                           update_connections=False),
+                                 mock.call('5678', 'user1',
+                                           update_connections=False)])
+        self.assertEqual(expected, result)
+        # case2: get_allocated return ['c83c', 'c83d']
+        get_allocated.return_value = [('c83c', 'user1', 0, 0, 0, ''),
+                                      ('c83d', 'user1', 0, 0, 0, '')]
+        get_path_count.return_value = 2
+        result = self.fcpops.get_available_fcp('user1', True)
+        expected = ['c83c', 'c83d']
+        self.assertEqual(expected, result)
 
 
 class TestFCPVolumeManager(base.SDKTestCase):
@@ -522,7 +630,10 @@ class TestFCPVolumeManager(base.SDKTestCase):
         base.set_conf('volume', 'fcp_list', 'b83c')
         # assign FCP
         self.db_op.new('b83c', 0)
+        # set connections to 1 and assigner_id to b83c
         self.db_op.assign('b83c', 'fakeuser')
+        # set reserved to 1
+        self.db_op.reserve('b83c')
 
         try:
             connections = self.volumeops.get_volume_connector('fakeuser',
@@ -533,7 +644,7 @@ class TestFCPVolumeManager(base.SDKTestCase):
             self.assertEqual(expected, connections)
 
             fcp_list = self.db_op.get_from_fcp('b83c')
-            expected = [(u'b83c', u'fakeuser', 1, 0, 0, u'')]
+            expected = [(u'b83c', u'fakeuser', 1, 1, 0, u'')]
             self.assertEqual(expected, fcp_list)
         finally:
             self.db_op.delete('b83c')
@@ -784,6 +895,10 @@ class TestFCPVolumeManager(base.SDKTestCase):
         self.assertRaises(exception.SDKBaseException,
                           self.volumeops.detach,
                           connection_info)
+        mock_add_disk.assert_called_once_with('f83c', 'USER1',
+                                              ['20076D8500005182'], '2222',
+                                              False, 'rhel7', '/dev/sdz', True,
+                                              True)
 
     @mock.patch("zvmsdk.volumeop.FCPManager._get_all_fcp_info")
     @mock.patch("zvmsdk.utils.check_userid_exist")
